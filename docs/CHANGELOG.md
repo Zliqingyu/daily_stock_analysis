@@ -65,6 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### 文档
 
 - 在 README 快速开始中补充行情数据源配置说明（`TUSHARE_TOKEN` / Longbridge），明确未配置时仍可使用 AkShare、Baostock、YFinance 等免费兜底源，并同步中英文完整指南。
+- [新功能] 注入 A 股特色补充数据（龙虎榜/融资融券/大宗交易/股东户数/资金流/概念板块）到分析提示词（数据源：`data_provider/astock_data_provider.py`，参考 [simonlin1212/a-stock-data](https://github.com/simonlin1212/a-stock-data)）。
+- [新功能] 支持 LOF 基金（161116/160644/501018）历史数据获取（`ak.fund_lof_hist_em`，失败回退 ETF）。
 
 ## [3.25.0] - 2026-07-03
 
