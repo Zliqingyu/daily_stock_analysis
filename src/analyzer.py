@@ -2057,6 +2057,7 @@ class GeminiAnalyzer:
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
 5. **风险优先级**：舆情中的风险点要醒目标出
+6. **到达概率说明**：`buy_reach_probability` / `stop_reach_probability` 是模型对各目标价位被触及的*主观概率估计*（0-100），需结合 `buy_time_horizon` / `stop_time_horizon` 给出的时间周期理解；它不是保证，仅作仓位与风控参考，不得据此承诺收益。
 
 ## 可操作性与稳定性约束
 
@@ -2147,7 +2148,11 @@ class GeminiAnalyzer:
                 "ideal_buy": "理想入场位：XX元（满足主要技能触发条件）",
                 "secondary_buy": "次优入场位：XX元（更保守或确认后执行）",
                 "stop_loss": "止损位：XX元（失效条件或X%风险）",
-                "take_profit": "目标位：XX元（按阻力位/风险回报比制定）"
+                "take_profit": "目标位：XX元（按阻力位/风险回报比制定）",
+                "buy_reach_probability": "建仓/目标位在未来周期被触及的概率(0-100整数，模型主观估计)",
+                "buy_time_horizon": "到达建仓/目标位的时间周期（如：1-2周）",
+                "stop_reach_probability": "止损位被触及的概率(0-100整数，模型主观估计)",
+                "stop_time_horizon": "触及止损位的时间周期（如：1周内）"
             },
             "position_strategy": {
                 "suggested_position": "建议仓位：X成",
@@ -2243,6 +2248,7 @@ class GeminiAnalyzer:
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
 5. **风险优先级**：舆情中的风险点要醒目标出
+6. **到达概率说明**：`buy_reach_probability` / `stop_reach_probability` 是模型对各目标价位被触及的*主观概率估计*（0-100），需结合 `buy_time_horizon` / `stop_time_horizon` 给出的时间周期理解；它不是保证，仅作仓位与风控参考，不得据此承诺收益。
 
 ## 可操作性与稳定性约束
 

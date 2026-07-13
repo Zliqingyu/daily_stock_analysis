@@ -1409,6 +1409,8 @@ class NotificationService(
                             f"| 🔵 {labels['secondary_buy_label']} | {self._clean_sniper_value(sniper.get('secondary_buy', 'N/A'))} |",
                             f"| 🛑 {labels['stop_loss_label']} | {self._clean_sniper_value(sniper.get('stop_loss', 'N/A'))} |",
                             f"| 🎊 {labels['take_profit_label']} | {self._clean_sniper_value(sniper.get('take_profit', 'N/A'))} |",
+                            f"| 📈 {labels.get('buy_reach_prob_label', '建仓/目标到达概率')} | {sniper.get('buy_reach_probability', 'N/A')}（{sniper.get('buy_time_horizon', '-')}） |",
+                            f"| 📉 {labels.get('stop_reach_prob_label', '止损到达概率')} | {sniper.get('stop_reach_probability', 'N/A')}（{sniper.get('stop_time_horizon', '-')}） |",
                             "",
                         ])
                     # 仓位策略
@@ -1638,6 +1640,12 @@ class NotificationService(
                         points.append(f"🛑{labels['stop_loss_label']}:{stop_loss[:15]}")
                     if take_profit:
                         points.append(f"🎊{labels['take_profit_label']}:{take_profit[:15]}")
+                    buy_prob = sniper.get('buy_reach_probability')
+                    stop_prob = sniper.get('stop_reach_probability')
+                    if buy_prob is not None:
+                        points.append(f"📈到达概率:{buy_prob}%")
+                    if stop_prob is not None:
+                        points.append(f"📉止损概率:{stop_prob}%")
                     if points:
                         lines.append(" | ".join(points))
                         lines.append("")

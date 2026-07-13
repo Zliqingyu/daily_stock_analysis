@@ -96,6 +96,11 @@ class SniperPoints(BaseModel):
     secondary_buy: Optional[Union[str, int, float]] = None
     stop_loss: Optional[Union[str, int, float]] = None
     take_profit: Optional[Union[str, int, float]] = None
+    # 到达概率（双引擎自定义）：模型对各目标价位被触及的*主观估计*，非保证
+    buy_reach_probability: Optional[int] = Field(None, ge=0, le=100)
+    buy_time_horizon: Optional[str] = None
+    stop_reach_probability: Optional[int] = Field(None, ge=0, le=100)
+    stop_time_horizon: Optional[str] = None
 
 
 class PositionStrategy(BaseModel):
