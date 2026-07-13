@@ -251,11 +251,11 @@ jobs:
           LLM_PACKYAPI_ENABLED: ${{ vars.LLM_PACKYAPI_ENABLED || secrets.LLM_PACKYAPI_ENABLED || 'true' }}
           LLM_PACKYAPI_EXTRA_HEADERS: ${{ vars.LLM_PACKYAPI_EXTRA_HEADERS || secrets.LLM_PACKYAPI_EXTRA_HEADERS }}
 
-          # AlphaSift 选股集成（双引擎工作流：选股 -> 深度分析）
-          ALPHASIFT_ENABLED: ${{ vars.ALPHASIFT_ENABLED || secrets.ALPHASIFT_ENABLED || 'true' }}
-          ALPHASIFT_SCREEN_ENABLED: ${{ vars.ALPHASIFT_SCREEN_ENABLED || secrets.ALPHASIFT_SCREEN_ENABLED || 'false' }}
-          ALPHASIFT_STRATEGY: ${{ vars.ALPHASIFT_STRATEGY || secrets.ALPHASIFT_STRATEGY || 'dragon_head' }}
-          ALPHASIFT_MAX_RESULTS: ${{ vars.ALPHASIFT_MAX_RESULTS || secrets.ALPHASIFT_MAX_RESULTS || '5' }}
+          # AlphaSift 选股 —— 每日龙头选股
+          ALPHASIFT_ENABLED: 'true'
+          ALPHASIFT_SCREEN_ENABLED: 'true'
+          ALPHASIFT_STRATEGY: 'dragon_head'
+          ALPHASIFT_MAX_RESULTS: '5'
 
           LLM_OLLAMA_PROTOCOL: ${{ vars.LLM_OLLAMA_PROTOCOL || secrets.LLM_OLLAMA_PROTOCOL }}
           LLM_OLLAMA_BASE_URL: ${{ vars.LLM_OLLAMA_BASE_URL || secrets.LLM_OLLAMA_BASE_URL }}

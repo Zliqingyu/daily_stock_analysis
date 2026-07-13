@@ -1,0 +1,172 @@
+name: 每周长期股推荐 + TradingAgents 深度分析
+
+on:
+  schedule:
+    - cron: '0 13 * * 0'     # 周日 UTC 13:00 = 北京时间 21:00
+  
+  workflow_dispatch:
+    inputs:
+      strategy:
+        description: '选股策略'
+        required: true
+        default: 'bull_trend'
+        type: choice
+        options:
+          - bull_trend        # 趋势牛股（稳健长期）
+          - growth_quality    # 成长质量
+          - dragon_head       # 龙头（激进）
+          - hot_theme         # 热点题材
+          - volume_breakout   # 放量突破
+      max_results:
+        description: '最多选几只'
+        required: false
+        default: '5'
+        type: string
+
+concurrency:
+  group: weekly-screening
+  cancel-in-progress: false
+
+jobs:
+  screen-and-analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+      
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: 安装 DSA 依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: 安装 TradingAgents-Astock
+        run: |
+          pip install git+https://github.com/simonlin1212/TradingAgents-astock.git
+      
+      - name: 创建必要目录
+        run: mkdir -p data logs reports
+      
+      - name: 执行选股 + 深度分析
+        env:
+          # LLM 配置
+          LLM_PRIMARY_PROTOCOL: ${{ vars.LLM_PRIMARY_PROTOCOL || 'openai' }}
+          LLM_PRIMARY_BASE_URL: ${{ vars.LLM_PRIMARY_BASE_URL || 'https://www.packyapi.com/v1' }}
+          LLM_PRIMARY_API_KEY: ${{ secrets.LLM_PRIMARY_API_KEY }}
+          LLM_PRIMARY_MODELS: ${{ vars.LLM_PRIMARY_MODELS || 'grok-4.5' }}
+          LLM_PRIMARY_ENABLED: 'true'
+          
+          # AlphaSift 选股
+          ALPHASIFT_ENABLED: 'true'
+          ALPHASIFT_SCREEN_ENABLED: 'true'
+          ALPHASIFT_STRATEGY: ${{ github.event.inputs.strategy || 'bull_trend' }}
+          ALPHASIFT_MAX_RESULTS: ${{ github.event.inputs.max_results || '5' }}
+          
+          # TradingAgents 配置
+          OPENAI_API_KEY: ${{ secrets.LLM_PRIMARY_API_KEY }}
+          BACKEND_URL: ${{ vars.LLM_PRIMARY_BASE_URL || 'https://www.packyapi.com/v1' }}
+          LLM_DEEP_MODEL: ${{ vars.LLM_PRIMARY_MODELS || 'grok-4.5' }}
+          LLM_QUICK_MODEL: ${{ vars.LLM_PRIMARY_MODELS || 'grok-4.5' }}
+          
+          # 邮件通知
+          EMAIL_SENDER: ${{ vars.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS }}
+          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || '无内鬼！绝密DSA!' }}
+          
+          # 其他
+          REPORT_TYPE: 'full'
+          PYTHONIOENCODING: 'utf-8'
+        run: |
+          STRATEGY="${{ github.event.inputs.strategy || 'bull_trend' }}"
+          MAX_RESULTS="${{ github.event.inputs.max_results || '5' }}"
+          
+          echo "=========================================="
+          echo "🔍 每周长期股推荐 + TradingAgents 深度分析"
+          echo "=========================================="
+          echo "⏰ 时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          echo "📊 策略: $STRATEGY（稳健长期）"
+          echo "🎯 最多选: $MAX_RESULTS 只"
+          echo "💡 目标: 周一买入建议"
+          echo "=========================================="
+          
+          # Step 1: AlphaSift 选股
+          echo ""
+          echo "📋 Step 1: AlphaSift 全市场选股..."
+          python scripts/alphasift_screen_and_analyze.py
+          SCREEN_EXIT=$?
+          
+          if [ $SCREEN_EXIT -ne 0 ]; then
+            echo "⚠️ AlphaSift 选股失败，退出码: $SCREEN_EXIT"
+            exit $SCREEN_EXIT
+          fi
+          
+          # Step 2: TradingAgents 深度分析（对选出的股票）
+          echo ""
+          echo "📋 Step 2: TradingAgents 深度分析..."
+          
+          # 从 AlphaSift 结果中提取股票代码
+          # alphasift_screen_and_analyze.py 会设置 STOCK_LIST 环境变量
+          if [ -n "$STOCK_LIST" ]; then
+            IFS=',' read -ra STOCKS <<< "$STOCK_LIST"
+            for STOCK in "${STOCKS[@]}"; do
+              STOCK=$(echo $STOCK | xargs)  # trim
+              echo "  🔬 分析 $STOCK ..."
+              python -c "
+import sys, io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.default_config import DEFAULT_CONFIG
+import os
+
+config = DEFAULT_CONFIG.copy()
+config['llm_provider'] = 'openai'
+config['backend_url'] = os.getenv('BACKEND_URL')
+config['deep_think_llm'] = os.getenv('LLM_DEEP_MODEL', 'grok-4.5')
+config['quick_think_llm'] = os.getenv('LLM_QUICK_MODEL', 'grok-4.5')
+config['max_debate_rounds'] = 1
+config['output_language'] = 'Chinese'
+config['data_vendors'] = {
+    'core_stock_apis': 'a_stock',
+    'technical_indicators': 'a_stock',
+    'fundamental_data': 'a_stock',
+    'news_data': 'a_stock',
+    'signal_data': 'a_stock',
+}
+
+ta = TradingAgentsGraph(debug=False, config=config)
+from datetime import datetime, timedelta
+trade_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+_, decision = ta.propagate('$STOCK', trade_date)
+print(f'=== $STOCK 分析结果 ===')
+print(decision)
+print()
+" 2>&1 | tee -a reports/tradingagents_$(date +%Y%m%d).log
+            done
+          else
+            echo "⚠️ 无候选股，跳过 TradingAgents 分析"
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "✅ 分析完成"
+          echo "=========================================="
+      
+      - name: 上传分析报告
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: weekly-screening-${{ github.run_number }}
+          path: |
+            reports/
+            logs/
+          retention-days: 30
