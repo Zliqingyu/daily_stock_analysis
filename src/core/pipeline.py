@@ -671,6 +671,39 @@ class StockAnalysisPipeline:
                 enhanced_context["portfolio_context"] = dict(portfolio_context)
             if isinstance(market_structure_context, dict):
                 enhanced_context["market_structure_context"] = market_structure_context
+
+            # Step 6.5: A-Stock Data 补充数据（龙虎榜/融资融券/大宗交易/股东户数/资金流/概念板块）
+            if market == "cn" and not is_bse_code(normalize_stock_code(code)):
+                try:
+                    import signal
+                    from data_provider.astock_data_provider import AstockDataProvider
+                    _trade_date = daily_market_target_date.isoformat() if daily_market_target_date else None
+                    _provider = AstockDataProvider()
+
+                    def _fetch_supplementary():
+                        return _provider.get_supplementary_data(code, trade_date=_trade_date)
+
+                    # fail-open: 最多等 30 秒，超时则跳过补充数据
+                    _old_handler = signal.signal(signal.SIGALRM, lambda *_: None) if hasattr(signal, 'SIGALRM') else None
+                    try:
+                        if hasattr(signal, 'SIGALRM'):
+                            signal.alarm(30)
+                        _supplementary = _fetch_supplementary()
+                        if hasattr(signal, 'SIGALRM'):
+                            signal.alarm(0)
+                    except Exception:
+                        _supplementary = {}
+                    finally:
+                        if _old_handler is not None and hasattr(signal, 'SIGALRM'):
+                            signal.signal(signal.SIGALRM, _old_handler)
+                            signal.alarm(0)
+
+                    _non_empty = {k: v for k, v in _supplementary.items() if v}
+                    if _non_empty:
+                        enhanced_context["astock_supplementary"] = _non_empty
+                        logger.info("%s(%s) A-Stock Data 补充数据: %s", stock_name, code, list(_non_empty.keys()))
+                except Exception as e:
+                    logger.debug("A-Stock Data 补充数据获取失败 %s: %s", code, e)
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             (
