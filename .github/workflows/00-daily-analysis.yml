@@ -242,6 +242,21 @@ jobs:
           LLM_OPENROUTER_ENABLED: ${{ vars.LLM_OPENROUTER_ENABLED || secrets.LLM_OPENROUTER_ENABLED }}
           LLM_OPENROUTER_EXTRA_HEADERS: ${{ vars.LLM_OPENROUTER_EXTRA_HEADERS || secrets.LLM_OPENROUTER_EXTRA_HEADERS }}
 
+          # PackyAPI（OpenAI 兼容中转，仅 grok-4.5；双引擎工作流默认渠道）
+          LLM_PACKYAPI_PROTOCOL: ${{ vars.LLM_PACKYAPI_PROTOCOL || secrets.LLM_PACKYAPI_PROTOCOL || 'openai' }}
+          LLM_PACKYAPI_BASE_URL: ${{ vars.LLM_PACKYAPI_BASE_URL || secrets.LLM_PACKYAPI_BASE_URL || 'https://www.packyapi.com/v1' }}
+          LLM_PACKYAPI_API_KEY: ${{ secrets.LLM_PACKYAPI_API_KEY }}
+          LLM_PACKYAPI_API_KEYS: ${{ secrets.LLM_PACKYAPI_API_KEYS }}
+          LLM_PACKYAPI_MODELS: ${{ vars.LLM_PACKYAPI_MODELS || secrets.LLM_PACKYAPI_MODELS || 'grok-4.5' }}
+          LLM_PACKYAPI_ENABLED: ${{ vars.LLM_PACKYAPI_ENABLED || secrets.LLM_PACKYAPI_ENABLED || 'true' }}
+          LLM_PACKYAPI_EXTRA_HEADERS: ${{ vars.LLM_PACKYAPI_EXTRA_HEADERS || secrets.LLM_PACKYAPI_EXTRA_HEADERS }}
+
+          # AlphaSift 选股集成（双引擎工作流：选股 -> 深度分析）
+          ALPHASIFT_ENABLED: ${{ vars.ALPHASIFT_ENABLED || secrets.ALPHASIFT_ENABLED || 'true' }}
+          ALPHASIFT_SCREEN_ENABLED: ${{ vars.ALPHASIFT_SCREEN_ENABLED || secrets.ALPHASIFT_SCREEN_ENABLED || 'false' }}
+          ALPHASIFT_STRATEGY: ${{ vars.ALPHASIFT_STRATEGY || secrets.ALPHASIFT_STRATEGY || 'dragon_head' }}
+          ALPHASIFT_MAX_RESULTS: ${{ vars.ALPHASIFT_MAX_RESULTS || secrets.ALPHASIFT_MAX_RESULTS || '5' }}
+
           LLM_OLLAMA_PROTOCOL: ${{ vars.LLM_OLLAMA_PROTOCOL || secrets.LLM_OLLAMA_PROTOCOL }}
           LLM_OLLAMA_BASE_URL: ${{ vars.LLM_OLLAMA_BASE_URL || secrets.LLM_OLLAMA_BASE_URL }}
           LLM_OLLAMA_API_KEY: ${{ secrets.LLM_OLLAMA_API_KEY }}
@@ -510,10 +525,16 @@ jobs:
             python main.py --market-review $FORCE_RUN_ARG
           elif [ "$MODE" = "stocks-only" ]; then
             python main.py --no-market-review $FORCE_RUN_ARG
-          else
-            python main.py $FORCE_RUN_ARG
-          fi
-      
+           else
+             python main.py $FORCE_RUN_ARG
+           fi
+
+           # AlphaSift 全市场选股 -> daily_stock_analysis 深度分析（双引擎工作流）
+           if [ "${ALPHASIFT_SCREEN_ENABLED:-}" = "true" ]; then
+             echo "🤖 运行 AlphaSift 选股并深度分析..."
+             python scripts/alphasift_screen_and_analyze.py
+           fi
+
       - name: 上传分析报告
         uses: actions/upload-artifact@v6
         if: always()
