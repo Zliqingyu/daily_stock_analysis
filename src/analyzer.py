@@ -4364,6 +4364,11 @@ class GeminiAnalyzer:
         """Extract the single allowed JSON object from an LLM response."""
 
         text = response_text or ""
+        # 清除 AI 思考标签（<think>...</think>），避免干扰纯 JSON 提取
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        # 处理未闭合 <think> 标签（grok-4.5 等模型有时不输出闭合标签）
+        if "<think>" in text:
+            text = text.split("<think>")[0]
         stripped = text.strip()
         if not stripped:
             raise ValueError("empty_response")
