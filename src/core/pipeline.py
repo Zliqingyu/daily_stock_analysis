@@ -679,13 +679,18 @@ class StockAnalysisPipeline:
                     from data_provider.astock_data_provider import AstockDataProvider
                     _trade_date = daily_market_target_date.isoformat() if daily_market_target_date else None
                     _provider = AstockDataProvider()
+                    _supplementary = {}
 
-                    with ThreadPoolExecutor(max_workers=1) as _pool:
+                    # 使用不带 with 的方式避免退出时等待
+                    _pool = ThreadPoolExecutor(max_workers=1)
+                    try:
                         _future = _pool.submit(_provider.get_supplementary_data, code, trade_date=_trade_date)
                         try:
                             _supplementary = _future.result(timeout=30)
                         except (FuturesTimeout, Exception):
                             _supplementary = {}
+                    finally:
+                        _pool.shutdown(wait=False, cancel_futures=True)
 
                     _non_empty = {k: v for k, v in _supplementary.items() if v}
                     if _non_empty:

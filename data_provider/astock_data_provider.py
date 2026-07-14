@@ -40,18 +40,20 @@ except Exception:
 
 EM_MIN_INTERVAL = 1.0
 _em_last_call = [0.0]
+_em_lock = __import__("threading").Lock()
 
 
 def em_get(url: str, params: dict = None, headers: dict = None,
            timeout: int = 15, **kwargs) -> requests.Response:
     """东财统一请求入口：自动节流 + 复用 session + 默认 UA。"""
-    wait = EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
-    if wait > 0:
-        time.sleep(wait + random.uniform(0.1, 0.5))
-    try:
-        return EM_SESSION.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
-    finally:
-        _em_last_call[0] = time.time()
+    with _em_lock:
+        wait = EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
+        if wait > 0:
+            time.sleep(wait + random.uniform(0.1, 0.5))
+        try:
+            return EM_SESSION.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
+        finally:
+            _em_last_call[0] = time.time()
 
 
 def eastmoney_datacenter(report_name: str, columns: str = "ALL",
@@ -74,12 +76,21 @@ def eastmoney_datacenter(report_name: str, columns: str = "ALL",
 # ── 代码标准化 ───────────────────────────────────────────────────────
 
 def _normalize_code(code: str) -> str:
-    """去掉 .SH/.SZ/.BJ 等后缀，返回纯 6 位数字代码。"""
+    """去掉 .SH/.SZ/.BJ 等后缀和 SH/SZ/BJ 等前缀，返回纯 6 位数字代码。"""
     c = code.strip().upper()
+    
+    # 先处理后缀: 600519.SH -> 600519
     for suffix in (".SH", ".SZ", ".BJ", ".SS"):
         if c.endswith(suffix):
             c = c[: -len(suffix)]
             break
+    
+    # 再处理前缀: SH600519 -> 600519, SZ000001 -> 000001, BJ920493 -> 920493
+    for prefix in ("SH", "SZ", "BJ"):
+        if c.startswith(prefix) and len(c) == len(prefix) + 6:
+            c = c[len(prefix):]
+            break
+    
     return c
 
 

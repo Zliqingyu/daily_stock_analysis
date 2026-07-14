@@ -4200,7 +4200,7 @@ class GeminiAnalyzer:
                 )
                 if len(records) > 1:
                     lines.append(f"- 近 {len(records)} 次上榜（近30日）")
-            if inst:
+            if inst and any(inst.get(k, 0) for k in ("buy_amt", "sell_amt", "net_amt")):
                 lines.append(
                     f"- 机构席位：买方 {inst.get('buy_amt', 'N/A')} 万｜卖方 {inst.get('sell_amt', 'N/A')} 万｜"
                     f"净额 {inst.get('net_amt', 'N/A')} 万"
