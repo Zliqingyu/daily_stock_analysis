@@ -675,17 +675,23 @@ class StockAnalysisPipeline:
             # Step 6.5: A-Stock Data 补充数据（龙虎榜/融资融券/大宗交易/股东户数/资金流/概念板块）
             if market == "cn" and not is_bse_code(normalize_stock_code(code)):
                 try:
+                    import threading
                     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
                     from data_provider.astock_data_provider import AstockDataProvider
                     _trade_date = daily_market_target_date.isoformat() if daily_market_target_date else None
                     _provider = AstockDataProvider()
+                    _cancel_event = threading.Event()
 
                     _executor = ThreadPoolExecutor(max_workers=1)
                     try:
-                        _future = _executor.submit(_provider.get_supplementary_data, code, trade_date=_trade_date)
+                        _future = _executor.submit(
+                            _provider.get_supplementary_data, code,
+                            trade_date=_trade_date, cancel_event=_cancel_event,
+                        )
                         try:
                             _supplementary = _future.result(timeout=30)
                         except (FuturesTimeout, Exception):
+                            _cancel_event.set()
                             _supplementary = {}
                     finally:
                         _executor.shutdown(wait=False, cancel_futures=True)

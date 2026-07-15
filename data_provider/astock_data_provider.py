@@ -446,17 +446,27 @@ class AstockDataProvider:
             logger.warning("[AStockData] 概念板块获取失败 %s: %s", code, e)
             return None
 
-    def get_supplementary_data(self, code: str, trade_date: str = None) -> Dict[str, Any]:
+    def get_supplementary_data(self, code: str, trade_date: str = None, cancel_event=None) -> Dict[str, Any]:
         """
         一次性获取某只股票的所有补充数据。
 
         返回 dict，每个 key 对应一类数据，获取失败的 key 值为 None。
+        cancel_event: 可选的 threading.Event，被 set() 时跳过后续请求。
         """
-        return {
-            "dragon_tiger": self.get_dragon_tiger(code, trade_date),
-            "margin_trading": self.get_margin_trading(code),
-            "block_trade": self.get_block_trade(code),
-            "holder_change": self.get_holder_change(code),
-            "fund_flow": self.get_fund_flow(code),
-            "concept_blocks": self.get_concept_blocks(code),
-        }
+        result = {}
+        for key, getter in [
+            ("dragon_tiger", lambda: self.get_dragon_tiger(code, trade_date)),
+            ("margin_trading", lambda: self.get_margin_trading(code)),
+            ("block_trade", lambda: self.get_block_trade(code)),
+            ("holder_change", lambda: self.get_holder_change(code)),
+            ("fund_flow", lambda: self.get_fund_flow(code)),
+            ("concept_blocks", lambda: self.get_concept_blocks(code)),
+        ]:
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            try:
+                result[key] = getter()
+            except Exception as e:
+                logger.warning("[AStockData] %s 获取失败 %s: %s", key, code, e)
+                result[key] = None
+        return result
