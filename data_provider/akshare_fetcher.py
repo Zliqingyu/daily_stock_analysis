@@ -99,13 +99,17 @@ def _is_lof_code(stock_code: str) -> bool:
     """判断代码是否为 LOF 基金（上市型开放式基金）。
 
     LOF 代码规则：
-    - 深交所 LOF: 160xxx, 161xxx（不含 162xxx/163xxx 等 ETF 专用段）
+    - 深交所 LOF: 160xxx, 161xxx, 162xxx, 163xxx, 166xxx, 167xxx
     - 上交所 LOF: 501xxx
     """
     code = stock_code.strip().split('.')[0]
     if len(code) != 6:
         return False
     if code.startswith('160') or code.startswith('161'):
+        return True
+    if code.startswith('162') or code.startswith('163'):
+        return True
+    if code.startswith('166') or code.startswith('167'):
         return True
     if code.startswith('501'):
         return True

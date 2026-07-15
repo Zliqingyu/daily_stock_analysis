@@ -44,6 +44,9 @@ jobs:
           SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
           MINIMAX_API_KEYS: ${{ secrets.MINIMAX_API_KEYS }}
           BOCHA_API_KEYS: ${{ secrets.BOCHA_API_KEYS }}
+          ANSPIRE_API_KEYS: ${{ secrets.ANSPIRE_API_KEYS }}
+          ANSPIRE_SEARCH_ENABLED: ${{ vars.ANSPIRE_SEARCH_ENABLED || 'true' }}
+          BRAVE_ENABLED: ${{ vars.BRAVE_ENABLED || 'true' }}
           CONNECTIVITY_TIMEOUT: ${{ vars.CONNECTIVITY_TIMEOUT || '30' }}
           # LLM 渠道：与 00-daily-analysis.yml 保持一致的映射
           LLM_CHANNELS: ${{ vars.LLM_CHANNELS || secrets.LLM_CHANNELS }}

@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 from urllib.parse import urlparse
 
 # Proxy config - controlled by USE_PROXY env var, off by default.
@@ -214,7 +214,8 @@ def check_llm_channels(config) -> List[CheckResult]:
 # 2) Search API Key Connectivity
 # ---------------------------------------------------------------------------
 def _http_probe(name: str, method: str, url: str, *, headers=None, params=None, json_body=None,
-                 secret: Optional[str] = None) -> CheckResult:
+                 secret: Optional[str] = None,
+                 validate_body: Optional[Callable[[dict], tuple[bool, str]]] = None) -> CheckResult:
     import requests
 
     start = time.time()
@@ -224,6 +225,18 @@ def _http_probe(name: str, method: str, url: str, *, headers=None, params=None, 
         )
         latency = time.time() - start
         if resp.status_code == 200:
+            # Validate response body for providers that return HTTP 200 on app-level errors
+            if validate_body:
+                try:
+                    body = resp.json()
+                    ok, detail = validate_body(body)
+                    if not ok:
+                        return CheckResult(
+                            "Search API", name, _netloc(url), "WARN",
+                            latency_s=latency, detail=f"HTTP 200 but {detail}",
+                        )
+                except Exception:
+                    pass  # Body parse failed, still PASS (not all providers return JSON)
             return CheckResult(
                 "Search API", name, _netloc(url), "PASS",
                 latency_s=latency, detail=f"HTTP {resp.status_code}",
@@ -293,6 +306,10 @@ def check_search_keys() -> List[CheckResult]:
             headers={"Authorization": f"Bearer {minimax[0]}", "Content-Type": "application/json", "MM-API-Source": "Minimax-MCP"},
             json_body={"q": "test"},
             secret=minimax[0],
+            validate_body=lambda b: (
+                b.get("base_resp", {}).get("status_code", 0) == 0,
+                f"base_resp.status_code={b.get('base_resp', {}).get('status_code')}",
+            ),
         ))
     else:
         results.append(CheckResult("Search API", "MiniMax", "api.minimaxi.com", "SKIP", detail="MINIMAX_API_KEYS not configured"))
@@ -305,9 +322,26 @@ def check_search_keys() -> List[CheckResult]:
             headers={"Authorization": f"Bearer {bocha[0]}", "Content-Type": "application/json"},
             json_body={"query": "test", "freshness": "oneWeek", "summary": True, "count": 1},
             secret=bocha[0],
+            validate_body=lambda b: (
+                b.get("code", 0) == 200 or b.get("code") is None,
+                f"code={b.get('code')}",
+            ),
         ))
     else:
         results.append(CheckResult("Search API", "Bocha", "api.bocha.cn", "SKIP", detail="BOCHA_API_KEYS not configured"))
+
+    # Anspire
+    anspire = _split_keys(os.getenv("ANSPIRE_API_KEYS"))
+    anspire_search_enabled = (os.getenv("ANSPIRE_SEARCH_ENABLED") or "").strip().lower() not in ("false", "0", "no")
+    if anspire and anspire_search_enabled:
+        results.append(_http_probe(
+            "Anspire", "POST", "https://api.anspire.ai/v1/search",
+            headers={"Authorization": f"Bearer {anspire[0]}", "Content-Type": "application/json"},
+            json_body={"q": "test", "num": 1},
+            secret=anspire[0],
+        ))
+    else:
+        results.append(CheckResult("Search API", "Anspire", "api.anspire.ai", "SKIP", detail="ANSPIRE_API_KEYS not configured or ANSPIRE_SEARCH_ENABLED=false"))
 
     return results
 
