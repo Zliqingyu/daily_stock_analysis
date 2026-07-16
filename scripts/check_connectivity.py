@@ -339,6 +339,10 @@ def check_search_keys() -> List[CheckResult]:
             headers={"Authorization": f"Bearer {anspire[0]}"},
             params={"query": "test", "top_k": 1},
             secret=anspire[0],
+            validate_body=lambda b: (
+                b.get("code", 200) == 200,
+                f"code={b.get('code')}",
+            ),
         ))
     else:
         results.append(CheckResult("Search API", "Anspire", "plugin.anspire.cn", "SKIP", detail="ANSPIRE_API_KEYS not configured or ANSPIRE_SEARCH_ENABLED=false"))
