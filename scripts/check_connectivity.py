@@ -335,13 +335,13 @@ def check_search_keys() -> List[CheckResult]:
     anspire_search_enabled = (os.getenv("ANSPIRE_SEARCH_ENABLED") or "").strip().lower() not in ("false", "0", "no")
     if anspire and anspire_search_enabled:
         results.append(_http_probe(
-            "Anspire", "POST", "https://api.anspire.ai/v1/search",
-            headers={"Authorization": f"Bearer {anspire[0]}", "Content-Type": "application/json"},
-            json_body={"q": "test", "num": 1},
+            "Anspire", "GET", "https://plugin.anspire.cn/api/ntsearch/search",
+            headers={"Authorization": f"Bearer {anspire[0]}"},
+            params={"query": "test", "top_k": 1},
             secret=anspire[0],
         ))
     else:
-        results.append(CheckResult("Search API", "Anspire", "api.anspire.ai", "SKIP", detail="ANSPIRE_API_KEYS not configured or ANSPIRE_SEARCH_ENABLED=false"))
+        results.append(CheckResult("Search API", "Anspire", "plugin.anspire.cn", "SKIP", detail="ANSPIRE_API_KEYS not configured or ANSPIRE_SEARCH_ENABLED=false"))
 
     return results
 
