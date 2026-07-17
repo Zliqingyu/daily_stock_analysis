@@ -123,9 +123,9 @@ _fetch_lof_data(code, start, end)
 | 场景 | 行为 | 测试 |
 |------|------|------|
 | `fund_lof_hist_em` 返回空 DataFrame | fallback 到 `_fetch_etf_data()` | `test_empty_lof_response_falls_back_to_etf` |
-| `fund_lof_hist_em` 抛普通异常 | fallback 到 `_fetch_etf_data()` | `test_lof_exception_falls_back_to_etf` |
 | `fund_lof_hist_em` 返回 None | fallback（`df is not None` 检查） | 覆盖在空响应分支 |
-| 东方财富限流（banned/blocked/频率） | `raise RateLimitError`，不 fallback | `test_lof_rate_limit_does_not_fallback` |
+| `fund_lof_hist_em` 抛普通异常（含非 JSON 响应） | akshare 内部 `response.json()` 失败时抛 ValueError，被 `except Exception` 捕获 → fallback | `test_lof_exception_falls_back_to_etf` |
+| 东方财富限流（banned/blocked/频率/rate/限制） | 关键词匹配 → `raise RateLimitError`，不 fallback | `test_lof_rate_limit_does_not_fallback` |
 | fallback 到 ETF 也失败 | DataFetcherManager 继续尝试 EfinanceFetcher → Baostock → YFinance | 上游现有 fallback chain |
 | 所有数据源都失败 | `DataFetchError` 抛出，pipeline 记录错误并跳过该股票 | 上游现有行为 |
 
