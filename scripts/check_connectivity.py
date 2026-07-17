@@ -23,6 +23,7 @@ import argparse
 import json
 import logging
 import os
+import requests
 import sys
 import time
 from dataclasses import dataclass
