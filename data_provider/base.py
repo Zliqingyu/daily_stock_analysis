@@ -166,8 +166,8 @@ FUND_PREFIXES = (
     "588", "589",               # Shanghai STAR ETF
 )
 
-# Deprecated alias for backward compat with existing import sites.
-# New code should use FUND_PREFIXES directly.
+# Deprecated alias — will be removed in a future cleanup.
+# Use FUND_PREFIXES directly in new code.
 ETF_PREFIXES = FUND_PREFIXES
 
 
