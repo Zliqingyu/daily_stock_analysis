@@ -127,6 +127,7 @@
 | 通知渠道 webhook 4xx（默认模式） | PASS（端点可达） | `test_webhook_4xx_without_sendtest_passes` |
 | 通知渠道 webhook 4xx（--send-test） | FAIL（实际发送失败） | `test_webhook_4xx_with_sendtest_fails` |
 | 通知渠道未配置 | SKIP | `test_all_skip_when_nothing_configured` |
+| API 限流（HTTP 429） | 连通性检查不做限流处理——429 表示端点可达但超频，默认模式判 PASS（HEAD），--send-test 模式判 FAIL | N/A（连通性检查不是性能测试） |
 
 **密钥脱敏**：所有 probe 函数的 error detail 都通过 `_short_error(exc, secret)` 脱敏，确保 API key/token/password 不出现在日志和报告中。
 
