@@ -706,6 +706,10 @@ class AkshareFetcher(BaseFetcher):
         LOF 与部分 ETF 共用 16xxxx 号段，ak.fund_lof_hist_em() 对某些代码
         可能返回空 DataFrame（该代码实际是 ETF）。因此空响应也需 fallback。
 
+        fallback 到 _fetch_etf_data 时，后者会再调一次 _enforce_rate_limit。
+        这不是重复——两次 API 调用之间确实需要间隔（LOF 调用消耗了时间，
+        但不足以保证安全间隔）。
+
         Args:
             stock_code: LOF 代码，如 '161116', '501018'
             start_date: 开始日期，格式 'YYYY-MM-DD'

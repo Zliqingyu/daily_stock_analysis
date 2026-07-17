@@ -345,3 +345,12 @@ class TestLofFullStackSemantics:
         from src.search_service import SearchService
         assert not base_is_etf("600519")
         assert not SearchService.is_index_or_etf("600519", "贵州茅台")
+
+    def test_18xxxx_not_in_fund_prefixes(self):
+        """18xxxx (traditional closed-end) must NOT be in FUND_PREFIXES.
+        Consistent with akshare_fetcher._is_etf_code which removed it."""
+        from data_provider.base import ETF_PREFIXES, FUND_PREFIXES
+        # 18 should not match any prefix in the tuple
+        for prefix in FUND_PREFIXES:
+            assert not "180003".startswith(prefix), f"180003 matched by prefix {prefix}"
+        assert "180003" not in FUND_PREFIXES
