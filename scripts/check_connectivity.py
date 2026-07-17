@@ -356,7 +356,335 @@ def check_search_keys() -> List[CheckResult]:
 
 
 # ---------------------------------------------------------------------------
-# 3) Model Catalog Fetch from base_url/models
+# 3) Notification Channel Connectivity
+# ---------------------------------------------------------------------------
+
+def _probe_webhook(name: str, url: str, *, send_test: bool = False,
+                   secret: Optional[str] = None, json_body: Optional[dict] = None) -> CheckResult:
+    """Probe a webhook-based notification channel.
+
+    Default mode: HEAD/GET request to verify URL is reachable (no message sent).
+    --send-test mode: POST a minimal test message.
+    """
+    start = time.time()
+    try:
+        if send_test:
+            body = json_body or {"text": "[Connectivity Test] DSA notification probe", "msgtype": "text"}
+            resp = requests.post(url, json=body, timeout=TIMEOUT,
+                                 headers={"Content-Type": "application/json"})
+        else:
+            resp = requests.head(url, timeout=TIMEOUT, allow_redirects=True)
+            if resp.status_code == 405:  # Method not allowed, try GET
+                resp = requests.get(url, timeout=TIMEOUT, allow_redirects=True)
+        latency = time.time() - start
+        if resp.status_code in (200, 201, 204, 302):
+            return CheckResult("Notification", name, _netloc(url), "PASS",
+                               latency_s=latency, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}")
+        # Many webhook endpoints return 4xx for HEAD/GET but are still valid
+        if not send_test and 400 <= resp.status_code < 500:
+            return CheckResult("Notification", name, _netloc(url), "PASS",
+                               latency_s=latency, detail=f"HTTP {resp.status_code} (endpoint reachable, use --send-test to verify)")
+        detail = f"HTTP {resp.status_code}"
+        if secret:
+            detail = detail.replace(secret, "***")
+        return CheckResult("Notification", name, _netloc(url), "FAIL",
+                           latency_s=latency, detail=detail)
+    except Exception as exc:
+        latency = time.time() - start
+        return CheckResult("Notification", name, _netloc(url), "FAIL",
+                           latency_s=latency, detail=_short_error(exc, secret))
+
+
+def _probe_email(name: str, sender: str, password: str, *, send_test: bool = False) -> CheckResult:
+    """Probe email connectivity by attempting SMTP login.
+
+    Default mode: connect + login only (no message sent).
+    --send-test mode: send a minimal test email to self.
+    """
+    import smtplib
+    from email.mime.text import MIMEText
+
+    start = time.time()
+    domain = sender.split("@")[-1] if "@" in sender else "unknown"
+    smtp_hosts = {
+        "gmail.com": ("smtp.gmail.com", 587),
+        "outlook.com": ("smtp-mail.outlook.com", 587),
+        "hotmail.com": ("smtp-mail.outlook.com", 587),
+        "qq.com": ("smtp.qq.com", 587),
+        "163.com": ("smtp.163.com", 587),
+        "126.com": ("smtp.126.com", 587),
+        "sina.com": ("smtp.sina.com", 587),
+        "foxmail.com": ("smtp.qq.com", 587),
+        "yeah.net": ("smtp.yeah.net", 587),
+    }
+    host, port = smtp_hosts.get(domain.lower(), (f"smtp.{domain}", 587))
+    try:
+        server = smtplib.SMTP(host, port, timeout=TIMEOUT)
+        server.starttls()
+        server.login(sender, password)
+        if send_test:
+            msg = MIMEText("[Connectivity Test] DSA notification probe", "plain", "utf-8")
+            msg["Subject"] = "DSA Connectivity Test"
+            msg["From"] = sender
+            msg["To"] = sender
+            server.sendmail(sender, [sender], msg.as_string())
+        server.quit()
+        latency = time.time() - start
+        return CheckResult("Notification", "Email", f"{host}:{port}", "PASS",
+                           latency_s=latency, detail=f"SMTP login OK ({sender}){' (+test sent)' if send_test else ''}")
+    except Exception as exc:
+        latency = time.time() - start
+        return CheckResult("Notification", "Email", f"{host}:{port}", "FAIL",
+                           latency_s=latency, detail=_short_error(exc, password))
+
+
+def _probe_telegram(name: str, token: str, chat_id: str, *, send_test: bool = False) -> CheckResult:
+    """Probe Telegram bot connectivity."""
+    base = f"https://api.telegram.org/bot{token}"
+    start = time.time()
+    try:
+        method = "sendMessage" if send_test else "getMe"
+        params = {} if not send_test else {"chat_id": chat_id, "text": "[Connectivity Test] DSA probe"}
+        resp = requests.get(f"{base}/{method}", params=params, timeout=TIMEOUT)
+        latency = time.time() - start
+        d = resp.json()
+        if d.get("ok"):
+            bot_name = d.get("result", {}).get("username", "") if not send_test else ""
+            return CheckResult("Notification", "Telegram", "api.telegram.org", "PASS",
+                               latency_s=latency, detail=f"Bot OK{' (@'+bot_name+')' if bot_name else ''}{' (+test sent)' if send_test else ''}")
+        return CheckResult("Notification", "Telegram", "api.telegram.org", "FAIL",
+                           latency_s=latency, detail=f"API error: {d.get('description', 'unknown')}")
+    except Exception as exc:
+        latency = time.time() - start
+        return CheckResult("Notification", "Telegram", "api.telegram.org", "FAIL",
+                           latency_s=latency, detail=_short_error(exc, token))
+
+
+def _probe_discord_slack(name: str, webhook_url: str, *, send_test: bool = False) -> CheckResult:
+    """Probe Discord/Slack webhook."""
+    start = time.time()
+    try:
+        if send_test:
+            resp = requests.post(webhook_url, json={"content": "[Connectivity Test] DSA probe"},
+                                 timeout=TIMEOUT, headers={"Content-Type": "application/json"})
+        else:
+            resp = requests.head(webhook_url, timeout=TIMEOUT, allow_redirects=True)
+        latency = time.time() - start
+        if resp.status_code in (200, 204, 302):
+            return CheckResult("Notification", name, _netloc(webhook_url), "PASS",
+                               latency_s=latency, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}")
+        if not send_test and 400 <= resp.status_code < 500:
+            return CheckResult("Notification", name, _netloc(webhook_url), "PASS",
+                               latency_s=latency, detail=f"HTTP {resp.status_code} (reachable, use --send-test)")
+        return CheckResult("Notification", name, _netloc(webhook_url), "FAIL",
+                           latency_s=latency, detail=f"HTTP {resp.status_code}: {resp.text[:80]}")
+    except Exception as exc:
+        latency = time.time() - start
+        return CheckResult("Notification", name, _netloc(webhook_url), "FAIL",
+                           latency_s=latency, detail=_short_error(exc))
+
+
+def check_notification_channels(config, *, send_test: bool = False) -> List[CheckResult]:
+    """Check all configured notification channels.
+
+    Channels that are not configured are skipped (SKIP status).
+    Channels that are configured get probed:
+    - Default: verify endpoint reachability without sending actual messages.
+    - --send-test: send a minimal test message to confirm end-to-end delivery.
+    """
+    results: List[CheckResult] = []
+    test_label = " (+test)" if send_test else ""
+
+    # WeChat (企业微信 webhook)
+    wechat_url = getattr(config, "wechat_webhook_url", None)
+    if wechat_url:
+        results.append(_probe_webhook("WeChat", wechat_url, send_test=send_test))
+    else:
+        results.append(CheckResult("Notification", "WeChat", "—", "SKIP", detail="WECHAT_WEBHOOK_URL not configured"))
+
+    # DingTalk
+    dingtalk_url = getattr(config, "dingtalk_webhook_url", None)
+    if dingtalk_url:
+        results.append(_probe_webhook("DingTalk", dingtalk_url, send_test=send_test))
+    else:
+        results.append(CheckResult("Notification", "DingTalk", "—", "SKIP", detail="DINGTALK_WEBHOOK_URL not configured"))
+
+    # Feishu
+    try:
+        from src.notification_contracts import is_feishu_static_configured
+        if is_feishu_static_configured(config):
+            feishu_url = getattr(config, "feishu_webhook_url", None)
+            if feishu_url:
+                results.append(_probe_webhook("Feishu", feishu_url, send_test=send_test))
+            else:
+                # App bot mode — check API endpoint reachability
+                domain = getattr(config, "feishu_domain", "feishu")
+                api_host = f"open.{domain}.cn" if domain == "feishu" else f"open.{domain}.com"
+                results.append(_probe_webhook("Feishu", f"https://{api_host}/open-apis/bot/v2/hook/test",
+                                            send_test=False))
+        else:
+            results.append(CheckResult("Notification", "Feishu", "—", "SKIP", detail="Feishu not configured"))
+    except Exception:
+        results.append(CheckResult("Notification", "Feishu", "—", "SKIP", detail="Feishu config unavailable"))
+
+    # Telegram
+    tg_token = getattr(config, "telegram_bot_token", None)
+    tg_chat = getattr(config, "telegram_chat_id", None)
+    if tg_token and tg_chat:
+        results.append(_probe_telegram("Telegram", tg_token, tg_chat, send_test=send_test))
+    else:
+        results.append(CheckResult("Notification", "Telegram", "—", "SKIP", detail="TELEGRAM_BOT_TOKEN/CHAT_ID not configured"))
+
+    # Email
+    email_sender = getattr(config, "email_sender", None)
+    email_pass = getattr(config, "email_password", None)
+    if email_sender and email_pass:
+        results.append(_probe_email("Email", email_sender, email_pass, send_test=send_test))
+    else:
+        results.append(CheckResult("Notification", "Email", "—", "SKIP", detail="EMAIL_SENDER/PASSWORD not configured"))
+
+    # Pushover
+    po_key = getattr(config, "pushover_user_key", None)
+    po_token = getattr(config, "pushover_api_token", None)
+    if po_key and po_token:
+        start = time.time()
+        try:
+            params = {"user": po_key, "token": po_token}
+            if send_test:
+                params.update({"message": "[Connectivity Test] DSA probe", "title": "DSA Test"})
+            resp = requests.post("https://api.pushover.net/1/messages.json", data=params, timeout=TIMEOUT)
+            latency = time.time() - start
+            d = resp.json()
+            if d.get("status") == 1:
+                results.append(CheckResult("Notification", "Pushover", "api.pushover.net", "PASS",
+                                          latency_s=latency, detail=f"OK{' (+test sent)' if send_test else ''}"))
+            else:
+                results.append(CheckResult("Notification", "Pushover", "api.pushover.net", "FAIL",
+                                          latency_s=latency, detail=str(d.get("errors", d))))
+        except Exception as exc:
+            results.append(CheckResult("Notification", "Pushover", "api.pushover.net", "FAIL",
+                                      latency_s=time.time() - start, detail=_short_error(exc, po_key)))
+    else:
+        results.append(CheckResult("Notification", "Pushover", "—", "SKIP", detail="PUSHOVER_USER_KEY/API_TOKEN not configured"))
+
+    # ntfy
+    try:
+        from src.notification_contracts import resolve_ntfy_endpoint
+        ntfy_server, ntfy_topic = resolve_ntfy_endpoint(getattr(config, "ntfy_url", None))
+        if ntfy_server and ntfy_topic:
+            test_url = f"{ntfy_server}/{ntfy_topic}"
+            if send_test:
+                resp = requests.post(test_url, data="[Connectivity Test] DSA probe", timeout=TIMEOUT)
+            else:
+                resp = requests.head(test_url, timeout=TIMEOUT, allow_redirects=True)
+            ok = resp.status_code in (200, 201, 204, 302, 404)  # 404 = topic exists but empty
+            results.append(CheckResult("Notification", "ntfy", _netloc(ntfy_server),
+                                      "PASS" if ok else "FAIL",
+                                      latency_s=0, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}"))
+        else:
+            results.append(CheckResult("Notification", "ntfy", "—", "SKIP", detail="NTFY_URL not configured"))
+    except Exception:
+        results.append(CheckResult("Notification", "ntfy", "—", "SKIP", detail="ntfy config unavailable"))
+
+    # Gotify
+    try:
+        from src.notification_contracts import resolve_gotify_message_endpoint
+        gotify_ep = resolve_gotify_message_endpoint(getattr(config, "gotify_url", None))
+        gotify_token = getattr(config, "gotify_token", None)
+        if gotify_ep and (gotify_token or "").strip():
+            headers = {"X-Gotify-Key": gotify_token}
+            if send_test:
+                resp = requests.post(gotify_ep, headers=headers,
+                                    json={"title": "DSA", "message": "Connectivity test", "priority": 1},
+                                    timeout=TIMEOUT)
+            else:
+                resp = requests.head(gotify_ep, headers=headers, timeout=TIMEOUT, allow_redirects=True)
+            ok = resp.status_code in (200, 201, 204, 302)
+            results.append(CheckResult("Notification", "Gotify", _netloc(gotify_ep),
+                                      "PASS" if ok else "FAIL",
+                                      latency_s=0, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}"))
+        else:
+            results.append(CheckResult("Notification", "Gotify", "—", "SKIP", detail="GOTIFY_URL/TOKEN not configured"))
+    except Exception:
+        results.append(CheckResult("Notification", "Gotify", "—", "SKIP", detail="gotify config unavailable"))
+
+    # PushPlus
+    pp_token = getattr(config, "pushplus_token", None)
+    if pp_token:
+        start = time.time()
+        try:
+            if send_test:
+                resp = requests.post("https://www.pushplus.plus/send",
+                                    json={"token": pp_token, "title": "DSA", "content": "Connectivity test"},
+                                    timeout=TIMEOUT)
+            else:
+                resp = requests.head("https://www.pushplus.plus/send", timeout=TIMEOUT, allow_redirects=True)
+            latency = time.time() - start
+            ok = resp.status_code in (200, 201, 204, 302)
+            results.append(CheckResult("Notification", "PushPlus", "pushplus.plus",
+                                      "PASS" if ok else "FAIL",
+                                      latency_s=latency, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}"))
+        except Exception as exc:
+            results.append(CheckResult("Notification", "PushPlus", "pushplus.plus", "FAIL",
+                                      latency_s=time.time() - start, detail=_short_error(exc, pp_token)))
+    else:
+        results.append(CheckResult("Notification", "PushPlus", "—", "SKIP", detail="PUSHPLUS_TOKEN not configured"))
+
+    # ServerChan3
+    sc_key = getattr(config, "serverchan3_sendkey", None)
+    if sc_key:
+        start = time.time()
+        try:
+            url = f"https://sc3.ft07.com/send/{sc_key}.send"
+            if send_test:
+                resp = requests.post(url, json={"title": "DSA", "desp": "Connectivity test"}, timeout=TIMEOUT)
+            else:
+                resp = requests.head(url, timeout=TIMEOUT, allow_redirects=True)
+            latency = time.time() - start
+            ok = resp.status_code in (200, 204, 302)
+            results.append(CheckResult("Notification", "ServerChan3", "sc3.ft07.com",
+                                      "PASS" if ok else "FAIL",
+                                      latency_s=latency, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}"))
+        except Exception as exc:
+            results.append(CheckResult("Notification", "ServerChan3", "sc3.ft07.com", "FAIL",
+                                      latency_s=time.time() - start, detail=_short_error(exc, sc_key)))
+    else:
+        results.append(CheckResult("Notification", "ServerChan3", "—", "SKIP", detail="SERVERCHAN3_SENDKEY not configured"))
+
+    # Custom webhook
+    custom_urls = getattr(config, "custom_webhook_urls", None)
+    if custom_urls:
+        for i, url in enumerate(custom_urls if isinstance(custom_urls, list) else [custom_urls]):
+            results.append(_probe_webhook(f"Custom[{i}]", url, send_test=send_test))
+    else:
+        results.append(CheckResult("Notification", "Custom", "—", "SKIP", detail="CUSTOM_WEBHOOK_URLS not configured"))
+
+    # Discord
+    discord_url = getattr(config, "discord_webhook_url", None)
+    if discord_url:
+        results.append(_probe_discord_slack("Discord", discord_url, send_test=send_test))
+    else:
+        results.append(CheckResult("Notification", "Discord", "—", "SKIP", detail="DISCORD_WEBHOOK_URL not configured"))
+
+    # Slack
+    slack_url = getattr(config, "slack_webhook_url", None)
+    if slack_url:
+        results.append(_probe_discord_slack("Slack", slack_url, send_test=send_test))
+    else:
+        results.append(CheckResult("Notification", "Slack", "—", "SKIP", detail="SLACK_WEBHOOK_URL not configured"))
+
+    # AstrBot
+    astr_url = getattr(config, "astrbot_url", None)
+    if astr_url:
+        results.append(_probe_webhook("AstrBot", astr_url, send_test=send_test))
+    else:
+        results.append(CheckResult("Notification", "AstrBot", "—", "SKIP", detail="ASTRBOT_URL not configured"))
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 4) Model Catalog Fetch from base_url/models
 # ---------------------------------------------------------------------------
 def _fetch_openai_models(base_url: Optional[str], api_key: Optional[str], timeout: int):
     """Fetch model catalog from OpenAI-compatible endpoint {base_url}/models.
@@ -551,6 +879,9 @@ def main():
     parser = argparse.ArgumentParser(description="DSA - Connectivity Check")
     parser.add_argument("--llm-only", action="store_true", help="Check LLM channels only")
     parser.add_argument("--search-only", action="store_true", help="Check search API keys only")
+    parser.add_argument("--notification-only", action="store_true", help="Check notification channels only")
+    parser.add_argument("--send-test", action="store_true",
+                        help="Send actual test messages to notification channels (default: probe endpoints only)")
     parser.add_argument("--list-models", action="store_true",
                         help="List LLM models and fetch catalog from base_url/models")
     args = parser.parse_args()
@@ -625,18 +956,33 @@ def main():
 
     results: List[CheckResult] = []
     _llm_config_failed = False
+    _notif_config = None
 
+    # Load config once for LLM + notification checks
+    config = None
     if not args.search_only:
         try:
             from src.config import get_config
             config = get_config()
-            results += check_llm_channels(config)
         except Exception as exc:
-            logger.warning(f"Failed to load LLM config, skipping LLM check: {exc}")
+            logger.warning(f"Failed to load config: {exc}")
             _llm_config_failed = True
 
-    if not args.llm_only:
+    if config and not args.search_only and not args.notification_only:
+        results += check_llm_channels(config)
+
+    if not args.llm_only and not args.notification_only:
         results += check_search_keys()
+
+    # Notification channels (requires config)
+    if not args.llm_only and not args.search_only:
+        if config:
+            try:
+                results += check_notification_channels(config, send_test=args.send_test)
+            except Exception as exc:
+                logger.warning(f"Notification channel check failed: {exc}")
+        elif not _llm_config_failed:
+            logger.info("Notification check skipped: config not available")
 
     # Fail-closed: if LLM config failed and we have no results at all,
     # or if --llm-only was used and config load failed, exit 1.
