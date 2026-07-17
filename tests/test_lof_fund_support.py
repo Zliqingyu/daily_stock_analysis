@@ -295,3 +295,53 @@ class TestLofNetworkValidation:
             start_date="20250101", end_date="20250301", adjust="qfq",
         )
         assert df is None or df.empty, "fund_lof_hist_em 对 ETF 代码应返回空"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end semantic tests: LOF codes recognized across the full stack
+# ---------------------------------------------------------------------------
+
+class TestLofFullStackSemantics:
+    """Verify that LOF codes (especially 501/502/506) are recognized as
+    funds everywhere — not just in AkshareFetcher, but also in
+    DataFetcherManager, SearchService, and pipeline-level checks.
+    """
+
+    def test_base_is_etf_code_includes_sh_lof(self):
+        """base._is_etf_code must include 501/502/506 for manager-level routing."""
+        from data_provider.base import _is_etf_code as base_is_etf
+        assert base_is_etf("501018"), "501018 should be recognized as fund in base"
+        assert base_is_etf("502000"), "502000 should be recognized as fund in base"
+        assert base_is_etf("506000"), "506000 should be recognized as fund in base"
+
+    def test_base_is_etf_code_includes_sz_lof(self):
+        """base._is_etf_code must include 160-169 for manager-level routing."""
+        from data_provider.base import _is_etf_code as base_is_etf
+        for code in ("160105", "161116", "164105", "169101"):
+            assert base_is_etf(code), f"{code} should be recognized as fund in base"
+
+    def test_search_service_recognizes_sh_lof_as_fund(self):
+        """SearchService.is_index_or_etf must return True for 501/502/506."""
+        from src.search_service import SearchService
+        assert SearchService.is_index_or_etf("501018", "南方原油LOF")
+        assert SearchService.is_index_or_etf("502000", "test")
+        assert SearchService.is_index_or_etf("506000", "test")
+
+    def test_search_service_recognizes_sz_lof_as_fund(self):
+        """SearchService.is_index_or_etf must return True for 16xxxx."""
+        from src.search_service import SearchService
+        assert SearchService.is_index_or_etf("161116", "test")
+        assert SearchService.is_index_or_etf("164105", "test")
+
+    def test_efinance_secid_for_sh_lof(self):
+        """EfinanceFetcher must build correct secid for Shanghai LOF."""
+        from data_provider.efinance_fetcher import _build_eastmoney_etf_secid
+        assert _build_eastmoney_etf_secid("501018") == "1.501018"
+        assert _build_eastmoney_etf_secid("502000") == "1.502000"
+
+    def test_normal_stock_not_recognized_as_fund(self):
+        """Normal A-share stocks must not be recognized as fund."""
+        from data_provider.base import _is_etf_code as base_is_etf
+        from src.search_service import SearchService
+        assert not base_is_etf("600519")
+        assert not SearchService.is_index_or_etf("600519", "贵州茅台")
