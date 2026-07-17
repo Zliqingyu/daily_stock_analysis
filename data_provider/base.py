@@ -149,19 +149,7 @@ def normalize_stock_code(stock_code: str) -> str:
     return code
 
 
-# Fund code prefixes: ETF and LOF share these broad prefixes, but LOF
-# adds 501/502/506 for Shanghai LOF.  The granular split lives in
-# data_provider/akshare_fetcher._is_lof_code/_is_etf_code; this tuple is
-# only used for "is this a fund at all?" checks in DataFetcherManager.
-FUND_PREFIXES = (
-    "51", "52", "56", "58",     # Shanghai ETF
-    "15", "16", "18",           # Shenzhen ETF/LOF
-    "501", "502", "506",        # Shanghai LOF
-    "588", "589",               # Shanghai STAR ETF
-)
-
-# Legacy alias (still used by some callers as "ETF or fund")
-ETF_PREFIXES = FUND_PREFIXES
+ETF_PREFIXES = ("51", "52", "56", "58", "15", "16", "18")
 
 
 def _is_us_market(code: str) -> bool:
@@ -210,11 +198,7 @@ def _is_tw_market(code: str) -> bool:
 
 
 def _is_etf_code(code: str) -> bool:
-    """判定 A 股 ETF/LOF 基金代码（保守规则）。
-
-    包含 LOF 号段（501/502/506）以保证 DataFetcherManager 和下游
-    服务将 LOF 与 ETF 一并按基金品类处理，而非普通股票。
-    """
+    """判定 A 股 ETF 基金代码（保守规则）。"""
     normalized = normalize_stock_code(code)
     return (
         normalized.isdigit()

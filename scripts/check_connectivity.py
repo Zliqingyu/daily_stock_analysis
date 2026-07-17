@@ -494,7 +494,6 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
     - --send-test: send a minimal test message to confirm end-to-end delivery.
     """
     results: List[CheckResult] = []
-    test_label = " (+test)" if send_test else ""
 
     # WeChat (企业微信 webhook)
     wechat_url = getattr(config, "wechat_webhook_url", None)
@@ -957,7 +956,6 @@ def main():
 
     results: List[CheckResult] = []
     _llm_config_failed = False
-    _notif_config = None
 
     # Load config once for LLM + notification checks
     config = None
