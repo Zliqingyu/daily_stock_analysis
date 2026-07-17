@@ -135,7 +135,7 @@ _fetch_lof_data(code, start, end)
 
 ```bash
 python -m pytest tests/test_lof_fund_support.py tests/test_etf_daily_routing.py -q -m "not network"
-# 56 passed, 3 deselected
+# 57 passed, 3 deselected
 ```
 
 测试覆盖：

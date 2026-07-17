@@ -118,13 +118,7 @@ def _is_lof_code(stock_code: str) -> bool:
     code = stock_code.strip().split('.')[0]
     if len(code) != 6 or not code.isdigit():
         return False
-    # 深交所 LOF: 160-169 全段
-    if code.startswith('16'):
-        return True
-    # 上交所 LOF: 501/502/506
-    if code.startswith(('501', '502', '506')):
-        return True
-    return False
+    return code.startswith(('16', '501', '502', '506'))
 
 
 def _is_etf_code(stock_code: str) -> bool:
@@ -148,19 +142,13 @@ def _is_etf_code(stock_code: str) -> bool:
     code = stock_code.strip().split('.')[0]
     if len(code) != 6 or not code.isdigit():
         return False
-    # 深交所 ETF: 159xxx
-    if code.startswith('159'):
-        return True
-    # 上交所 ETF: 510-518, 520, 526, 530, 560-563, 588-589（基于实际挂牌）
-    if code.startswith(('510', '511', '512', '513', '514', '515', '516', '517', '518')):
-        return True
-    if code.startswith(('520', '526', '530')):
-        return True
-    if code.startswith(('560', '561', '562', '563')):
-        return True
-    if code.startswith(('588', '589')):
-        return True
-    return False
+    return code.startswith((
+        '159',                                          # Shenzhen ETF
+        '510', '511', '512', '513', '514', '515', '516', '517', '518',  # Shanghai ETF
+        '520', '526', '530',                            # Shanghai ETF
+        '560', '561', '562', '563',                     # Shanghai ETF
+        '588', '589',                                   # Shanghai STAR ETF
+    ))
 
 
 def _is_hk_code(stock_code: str) -> bool:

@@ -184,6 +184,26 @@ class TestLofEmptyFallback:
         fake_etf.assert_called_once()
         assert df is etf_df
 
+    def test_none_lof_response_falls_back_to_etf(self):
+        """fund_lof_hist_em 返回 None 时也走 fallback"""
+        fetcher = _make_fetcher()
+        etf_df = _history_frame()
+        fake_lof = MagicMock(return_value=None)
+        fake_etf = MagicMock(return_value=etf_df)
+        fake_akshare = types.SimpleNamespace(
+            fund_lof_hist_em=fake_lof,
+            fund_etf_hist_em=fake_etf,
+        )
+
+        with patch.dict(sys.modules, {"akshare": fake_akshare}):
+            with patch.object(fetcher, "_set_random_user_agent"), \
+                 patch.object(fetcher, "_enforce_rate_limit"):
+                df = fetcher._fetch_lof_data("161116", "2026-01-01", "2026-01-05")
+
+        fake_lof.assert_called_once()
+        fake_etf.assert_called_once()
+        assert df is etf_df
+
 
 # ---------------------------------------------------------------------------
 # Exception fallback
