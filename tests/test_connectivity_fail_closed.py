@@ -196,3 +196,110 @@ class TestValidateBodyContracts:
         anspire_result = [r for r in results if r.name == "Anspire"]
         assert anspire_result, "Anspire check should exist"
         assert anspire_result[0].status == "WARN", f"Empty {{}} should be WARN, got {anspire_result[0].status}"
+
+
+# ---------------------------------------------------------------------------
+# Notification channel probe tests
+# ---------------------------------------------------------------------------
+
+class TestNotificationProbeConfig:
+    """Notification probes: configured → probe, not configured → SKIP."""
+
+    def _make_config(self, **kwargs):
+        cfg = MagicMock(spec=[])
+        for k, v in kwargs.items():
+            setattr(cfg, k, v)
+        return cfg
+
+    def test_all_skip_when_nothing_configured(self):
+        """Empty config → all 14 channels SKIP."""
+        from scripts.check_connectivity import check_notification_channels
+        config = self._make_config()
+        results = check_notification_channels(config)
+        skip_names = [r.name for r in results if r.status == "SKIP"]
+        assert len(skip_names) >= 14, f"Expected 14+ SKIPs, got {len(skip_names)}"
+        assert all(r.status == "SKIP" for r in results), "All should be SKIP"
+
+    def test_wechat_configured_probes(self):
+        """WeChat configured → not SKIP."""
+        from scripts.check_connectivity import check_notification_channels
+        config = self._make_config(wechat_webhook_url="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test")
+        with patch("scripts.check_connectivity.requests.head", return_value=MagicMock(status_code=200)):
+            results = check_notification_channels(config)
+        wechat = [r for r in results if r.name == "WeChat"]
+        assert wechat and wechat[0].status != "SKIP"
+
+    def test_email_configured_probes_smtp(self):
+        """Email configured → SMTP probe (mocked)."""
+        from scripts.check_connectivity import check_notification_channels, _probe_email
+        with patch("smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value = mock_server
+            result = _probe_email("Email", "test@gmail.com", "password")
+        assert result.status == "PASS"
+        assert "login OK" in result.detail
+
+    def test_email_unreachable_fails(self):
+        """Email SMTP unreachable → FAIL."""
+        from scripts.check_connectivity import _probe_email
+        with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("connection refused")):
+            result = _probe_email("Email", "test@gmail.com", "password")
+        assert result.status == "FAIL"
+        assert "password" not in result.detail  # secret sanitized
+
+    def test_telegram_configured_probes(self):
+        """Telegram configured → getMe probe (mocked)."""
+        from scripts.check_connectivity import _probe_telegram
+        with patch("scripts.check_connectivity.requests.get",
+                   return_value=MagicMock(json=MagicMock(return_value={"ok": True, "result": {"username": "testbot"}}))):
+            result = _probe_telegram("Telegram", "fake_token", "fake_chat")
+        assert result.status == "PASS"
+        assert "testbot" in result.detail
+
+    def test_telegram_invalid_token_fails(self):
+        """Telegram invalid token → FAIL."""
+        from scripts.check_connectivity import _probe_telegram
+        with patch("scripts.check_connectivity.requests.get",
+                   return_value=MagicMock(json=MagicMock(return_value={"ok": False, "description": "Unauthorized"}))):
+            result = _probe_telegram("Telegram", "fake_token", "fake_chat")
+        assert result.status == "FAIL"
+        assert "fake_token" not in result.detail  # token sanitized
+
+    def test_webhook_reachable_passes(self):
+        """Webhook returns 200 → PASS."""
+        from scripts.check_connectivity import _probe_webhook
+        with patch("scripts.check_connectivity.requests.head", return_value=MagicMock(status_code=200)):
+            result = _probe_webhook("TestWH", "https://example.com/hook")
+        assert result.status == "PASS"
+
+    def test_webhook_4xx_without_sendtest_passes(self):
+        """Webhook returns 4xx without --send-test → PASS (reachable)."""
+        from scripts.check_connectivity import _probe_webhook
+        with patch("scripts.check_connectivity.requests.head", return_value=MagicMock(status_code=403)):
+            result = _probe_webhook("TestWH", "https://example.com/hook", send_test=False)
+        assert result.status == "PASS"
+        assert "reachable" in result.detail
+
+    def test_webhook_4xx_with_sendtest_fails(self):
+        """Webhook returns 4xx WITH --send-test → FAIL."""
+        from scripts.check_connectivity import _probe_webhook
+        with patch("scripts.check_connectivity.requests.post", return_value=MagicMock(status_code=403, text="Forbidden")):
+            result = _probe_webhook("TestWH", "https://example.com/hook", send_test=True)
+        assert result.status == "FAIL"
+
+    def test_webhook_network_error_fails(self):
+        """Webhook network error → FAIL."""
+        from scripts.check_connectivity import _probe_webhook
+        with patch("scripts.check_connectivity.requests.head", side_effect=ConnectionError("timeout")):
+            result = _probe_webhook("TestWH", "https://example.com/hook")
+        assert result.status == "FAIL"
+
+    def test_send_test_does_not_fire_without_flag(self):
+        """Default mode must NOT POST (no test messages sent)."""
+        from scripts.check_connectivity import check_notification_channels
+        config = self._make_config(wechat_webhook_url="https://example.com/hook")
+        with patch("scripts.check_connectivity.requests.head", return_value=MagicMock(status_code=200)) as mock_head, \
+             patch("scripts.check_connectivity.requests.post") as mock_post:
+            check_notification_channels(config, send_test=False)
+        mock_post.assert_not_called()
+        mock_head.assert_called()
