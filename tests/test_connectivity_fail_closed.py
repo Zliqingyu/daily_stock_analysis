@@ -9,10 +9,9 @@ Covers ZhuLinsen's requirements:
 4. --llm-only with config load failure → exit 1 (not exit 0)
 """
 
-import pytest
 import sys
 import os
-from unittest.mock import patch, MagicMock, mock_open
+from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

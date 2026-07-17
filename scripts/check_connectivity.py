@@ -820,7 +820,7 @@ def render_markdown(results: List[CheckResult], env_label: str) -> str:
         counts[r.status] = counts.get(r.status, 0) + 1
 
     lines: List[str] = []
-    lines.append(f"# 🔌 Connectivity Check Report")
+    lines.append("# 🔌 Connectivity Check Report")
     lines.append("")
     lines.append(f"- Time: {now}")
     lines.append(f"- Environment: {env_label}")
