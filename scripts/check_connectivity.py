@@ -396,7 +396,7 @@ def _probe_webhook(name: str, url: str, *, send_test: bool = False,
                            latency_s=latency, detail=_short_error(exc, secret))
 
 
-def _probe_email(name: str, sender: str, password: str, *, send_test: bool = False) -> CheckResult:
+def _probe_email(sender: str, password: str, *, send_test: bool = False) -> CheckResult:
     """Probe email connectivity by attempting SMTP login.
 
     Default mode: connect + login only (no message sent).
@@ -439,7 +439,7 @@ def _probe_email(name: str, sender: str, password: str, *, send_test: bool = Fal
                            latency_s=latency, detail=_short_error(exc, password))
 
 
-def _probe_telegram(name: str, token: str, chat_id: str, *, send_test: bool = False) -> CheckResult:
+def _probe_telegram(token: str, chat_id: str, *, send_test: bool = False) -> CheckResult:
     """Probe Telegram bot connectivity."""
     base = f"https://api.telegram.org/bot{token}"
     start = time.time()
@@ -531,7 +531,7 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
     tg_token = getattr(config, "telegram_bot_token", None)
     tg_chat = getattr(config, "telegram_chat_id", None)
     if tg_token and tg_chat:
-        results.append(_probe_telegram("Telegram", tg_token, tg_chat, send_test=send_test))
+        results.append(_probe_telegram(tg_token, tg_chat, send_test=send_test))
     else:
         results.append(CheckResult("Notification", "Telegram", "—", "SKIP", detail="TELEGRAM_BOT_TOKEN/CHAT_ID not configured"))
 
@@ -539,7 +539,7 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
     email_sender = getattr(config, "email_sender", None)
     email_pass = getattr(config, "email_password", None)
     if email_sender and email_pass:
-        results.append(_probe_email("Email", email_sender, email_pass, send_test=send_test))
+        results.append(_probe_email(email_sender, email_pass, send_test=send_test))
     else:
         results.append(CheckResult("Notification", "Email", "—", "SKIP", detail="EMAIL_SENDER/PASSWORD not configured"))
 
@@ -572,15 +572,17 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
         from src.notification_contracts import resolve_ntfy_endpoint
         ntfy_server, ntfy_topic = resolve_ntfy_endpoint(getattr(config, "ntfy_url", None))
         if ntfy_server and ntfy_topic:
+            start = time.time()
             test_url = f"{ntfy_server}/{ntfy_topic}"
             if send_test:
                 resp = requests.post(test_url, data="[Connectivity Test] DSA probe", timeout=TIMEOUT)
             else:
                 resp = requests.head(test_url, timeout=TIMEOUT, allow_redirects=True)
+            latency = time.time() - start
             ok = resp.status_code in (200, 201, 204, 302, 404)  # 404 = topic exists but empty
             results.append(CheckResult("Notification", "ntfy", _netloc(ntfy_server),
                                       "PASS" if ok else "FAIL",
-                                      latency_s=0, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}"))
+                                      latency_s=latency, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}"))
         else:
             results.append(CheckResult("Notification", "ntfy", "—", "SKIP", detail="NTFY_URL not configured"))
     except Exception:
@@ -592,6 +594,7 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
         gotify_ep = resolve_gotify_message_endpoint(getattr(config, "gotify_url", None))
         gotify_token = getattr(config, "gotify_token", None)
         if gotify_ep and (gotify_token or "").strip():
+            start = time.time()
             headers = {"X-Gotify-Key": gotify_token}
             if send_test:
                 resp = requests.post(gotify_ep, headers=headers,
@@ -599,10 +602,11 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
                                     timeout=TIMEOUT)
             else:
                 resp = requests.head(gotify_ep, headers=headers, timeout=TIMEOUT, allow_redirects=True)
+            latency = time.time() - start
             ok = resp.status_code in (200, 201, 204, 302)
             results.append(CheckResult("Notification", "Gotify", _netloc(gotify_ep),
                                       "PASS" if ok else "FAIL",
-                                      latency_s=0, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}"))
+                                      latency_s=latency, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}"))
         else:
             results.append(CheckResult("Notification", "Gotify", "—", "SKIP", detail="GOTIFY_URL/TOKEN not configured"))
     except Exception:

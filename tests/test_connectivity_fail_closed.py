@@ -231,11 +231,11 @@ class TestNotificationProbeConfig:
 
     def test_email_configured_probes_smtp(self):
         """Email configured → SMTP probe (mocked)."""
-        from scripts.check_connectivity import check_notification_channels, _probe_email
+        from scripts.check_connectivity import _probe_email
         with patch("smtplib.SMTP") as mock_smtp:
             mock_server = MagicMock()
             mock_smtp.return_value = mock_server
-            result = _probe_email("Email", "test@gmail.com", "password")
+            result = _probe_email("test@gmail.com", "password")
         assert result.status == "PASS"
         assert "login OK" in result.detail
 
@@ -243,7 +243,7 @@ class TestNotificationProbeConfig:
         """Email SMTP unreachable → FAIL."""
         from scripts.check_connectivity import _probe_email
         with patch("smtplib.SMTP", side_effect=ConnectionRefusedError("connection refused")):
-            result = _probe_email("Email", "test@gmail.com", "password")
+            result = _probe_email("test@gmail.com", "password")
         assert result.status == "FAIL"
         assert "password" not in result.detail  # secret sanitized
 
@@ -252,7 +252,7 @@ class TestNotificationProbeConfig:
         from scripts.check_connectivity import _probe_telegram
         with patch("scripts.check_connectivity.requests.get",
                    return_value=MagicMock(json=MagicMock(return_value={"ok": True, "result": {"username": "testbot"}}))):
-            result = _probe_telegram("Telegram", "fake_token", "fake_chat")
+            result = _probe_telegram("fake_token", "fake_chat")
         assert result.status == "PASS"
         assert "testbot" in result.detail
 
@@ -261,7 +261,7 @@ class TestNotificationProbeConfig:
         from scripts.check_connectivity import _probe_telegram
         with patch("scripts.check_connectivity.requests.get",
                    return_value=MagicMock(json=MagicMock(return_value={"ok": False, "description": "Unauthorized"}))):
-            result = _probe_telegram("Telegram", "fake_token", "fake_chat")
+            result = _probe_telegram("fake_token", "fake_chat")
         assert result.status == "FAIL"
         assert "fake_token" not in result.detail  # token sanitized
 
