@@ -526,13 +526,23 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
         from src.notification_contracts import is_feishu_static_configured
         if is_feishu_static_configured(config):
             feishu_url = getattr(config, "feishu_webhook_url", None)
-            feishu_keyword = getattr(config, "feishu_webhook_keyword", None) or ""
+            feishu_secret = getattr(config, "feishu_webhook_secret", None) or ""
             if feishu_url:
-                # In --send-test mode, prepend keyword if configured
-                if send_test and feishu_keyword:
-                    results.append(_probe_webhook("Feishu", feishu_url, send_test=send_test,
-                                                 json_body={"msg_type": "text",
-                                                           "content": {"text": f"{feishu_keyword}\n[Connectivity Test] DSA probe"}}))
+                # In --send-test mode, prepend keyword + add security signature if configured
+                if send_test:
+                    import hashlib, hmac as _hmac, base64 as _b64
+                    keyword = getattr(config, "feishu_webhook_keyword", None) or ""
+                    msg_text = f"{keyword}\n[Connectivity Test] DSA probe" if keyword else "[Connectivity Test] DSA probe"
+                    body: dict = {"msg_type": "text", "content": {"text": msg_text}}
+                    if feishu_secret:
+                        timestamp = str(int(time.time()))
+                        string_to_sign = f"{timestamp}\n{feishu_secret}"
+                        sign = _b64.b64encode(_hmac.new(string_to_sign.encode("utf-8"),
+                                                         digestmod=hashlib.sha256).digest()).decode("utf-8")
+                        body["timestamp"] = timestamp
+                        body["sign"] = sign
+                    results.append(_probe_webhook("Feishu", feishu_url, send_test=send_test, json_body=body,
+                                                 secret=feishu_secret or None))
                 else:
                     results.append(_probe_webhook("Feishu", feishu_url, send_test=send_test))
             else:
@@ -627,7 +637,7 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
             # Gotify message endpoint: {base_url}/message?token={token}
             from urllib.parse import urlparse
             parsed = urlparse(gotify_url)
-            gotify_ep = f"{parsed.scheme}://{parsed.netloc}/message"
+            gotify_ep = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}/message"
             start = time.time()
             headers = {"X-Gotify-Key": gotify_token}
             if send_test:
