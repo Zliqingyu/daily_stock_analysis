@@ -302,3 +302,62 @@ class TestNotificationProbeConfig:
             check_notification_channels(config, send_test=False)
         mock_post.assert_not_called()
         mock_head.assert_called()
+
+    def test_discord_bot_only_not_skip(self):
+        """Discord configured with bot_token + channel_id (no webhook) → not SKIP."""
+        from scripts.check_connectivity import check_notification_channels
+        config = self._make_config(discord_bot_token="dtok", discord_main_channel_id="123")
+        with patch("scripts.check_connectivity.requests.get",
+                   return_value=MagicMock(status_code=200, json=MagicMock(return_value={"id": "123"}))):
+            results = check_notification_channels(config, send_test=False)
+        discord = [r for r in results if r.name == "Discord"]
+        assert discord and discord[0].status != "SKIP"
+
+    def test_slack_bot_only_not_skip(self):
+        """Slack configured with bot_token + channel_id (no webhook) → not SKIP."""
+        from scripts.check_connectivity import check_notification_channels
+        config = self._make_config(slack_bot_token="xoxb-test", slack_channel_id="C123")
+        with patch("scripts.check_connectivity.requests.post",
+                   return_value=MagicMock(json=MagicMock(return_value={"ok": True, "user": "bot"}))):
+            results = check_notification_channels(config, send_test=False)
+        slack = [r for r in results if r.name == "Slack"]
+        assert slack and slack[0].status != "SKIP"
+
+    def test_ntfy_configured_not_skip(self):
+        """ntfy configured with URL → not SKIP (no sender module import needed)."""
+        from scripts.check_connectivity import check_notification_channels
+        config = self._make_config(ntfy_url="https://ntfy.sh/mytopic")
+        with patch("scripts.check_connectivity.requests.head", return_value=MagicMock(status_code=200)):
+            results = check_notification_channels(config, send_test=False)
+        ntfy = [r for r in results if r.name == "ntfy"]
+        assert ntfy and ntfy[0].status != "SKIP"
+
+    def test_gotify_configured_not_skip(self):
+        """Gotify configured with URL + token → not SKIP."""
+        from scripts.check_connectivity import check_notification_channels
+        config = self._make_config(gotify_url="https://gotify.example.com", gotify_token="tok123")
+        with patch("scripts.check_connectivity.requests.head", return_value=MagicMock(status_code=200)):
+            results = check_notification_channels(config, send_test=False)
+        gotify = [r for r in results if r.name == "Gotify"]
+        assert gotify and gotify[0].status != "SKIP"
+
+    def test_dingtalk_secret_added_on_send_test(self):
+        """DingTalk --send-test with secret → URL gets timestamp+sign params."""
+        from scripts.check_connectivity import check_notification_channels
+        config = self._make_config(dingtalk_webhook_url="https://oapi.dingtalk.com/robot/send?access_token=test",
+                                  dingtalk_secret="SEC123456")
+        with patch("scripts.check_connectivity.requests.post", return_value=MagicMock(status_code=200)) as mock_post:
+            check_notification_channels(config, send_test=True)
+        assert mock_post.called
+        called_url = mock_post.call_args[0][0]
+        assert "timestamp=" in called_url and "sign=" in called_url
+
+    def test_ntfy_token_added_on_send_test(self):
+        """ntfy --send-test with token → Authorization header sent."""
+        from scripts.check_connectivity import check_notification_channels
+        config = self._make_config(ntfy_url="https://ntfy.sh/mytopic", ntfy_token="tok_db")
+        with patch("scripts.check_connectivity.requests.post", return_value=MagicMock(status_code=200)) as mock_post:
+            check_notification_channels(config, send_test=True)
+        assert mock_post.called
+        headers = mock_post.call_args[1].get("headers", {})
+        assert headers.get("Authorization") == "Bearer tok_db"

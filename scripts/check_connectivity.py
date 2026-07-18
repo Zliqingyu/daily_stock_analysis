@@ -504,8 +504,20 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
 
     # DingTalk
     dingtalk_url = getattr(config, "dingtalk_webhook_url", None)
+    dingtalk_secret = getattr(config, "dingtalk_secret", None)
     if dingtalk_url:
-        results.append(_probe_webhook("DingTalk", dingtalk_url, send_test=send_test))
+        # In --send-test mode, append DingTalk sign if secret is configured
+        probe_url = dingtalk_url
+        if send_test and dingtalk_secret:
+            import hashlib, hmac, base64, urllib.parse
+            timestamp = str(round(time.time() * 1000))
+            string_to_sign = f'{timestamp}\n{dingtalk_secret}'
+            hmac_code = hmac.new(dingtalk_secret.encode('utf-8'),
+                                string_to_sign.encode('utf-8'), digestmod=hashlib.sha256).digest()
+            sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+            sep = "&" if "?" in probe_url else "?"
+            probe_url = f"{probe_url}{sep}timestamp={timestamp}&sign={sign}"
+        results.append(_probe_webhook("DingTalk", probe_url, send_test=send_test, secret=dingtalk_secret))
     else:
         results.append(CheckResult("Notification", "DingTalk", "—", "SKIP", detail="DINGTALK_WEBHOOK_URL not configured"))
 
@@ -514,8 +526,15 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
         from src.notification_contracts import is_feishu_static_configured
         if is_feishu_static_configured(config):
             feishu_url = getattr(config, "feishu_webhook_url", None)
+            feishu_keyword = getattr(config, "feishu_webhook_keyword", None) or ""
             if feishu_url:
-                results.append(_probe_webhook("Feishu", feishu_url, send_test=send_test))
+                # In --send-test mode, prepend keyword if configured
+                if send_test and feishu_keyword:
+                    results.append(_probe_webhook("Feishu", feishu_url, send_test=send_test,
+                                                 json_body={"msg_type": "text",
+                                                           "content": {"text": f"{feishu_keyword}\n[Connectivity Test] DSA probe"}}))
+                else:
+                    results.append(_probe_webhook("Feishu", feishu_url, send_test=send_test))
             else:
                 # App bot mode — check API endpoint reachability
                 domain = getattr(config, "feishu_domain", "feishu")
@@ -568,32 +587,47 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
         results.append(CheckResult("Notification", "Pushover", "—", "SKIP", detail="PUSHOVER_USER_KEY/API_TOKEN not configured"))
 
     # ntfy
-    try:
-        from src.notification_contracts import resolve_ntfy_endpoint
-        ntfy_server, ntfy_topic = resolve_ntfy_endpoint(getattr(config, "ntfy_url", None))
-        if ntfy_server and ntfy_topic:
-            start = time.time()
-            test_url = f"{ntfy_server}/{ntfy_topic}"
-            if send_test:
-                resp = requests.post(test_url, data="[Connectivity Test] DSA probe", timeout=TIMEOUT)
+    ntfy_url = getattr(config, "ntfy_url", None)
+    if ntfy_url:
+        try:
+            # Parse ntfy URL: https://server/topic or https://server/topic?token=xxx
+            from urllib.parse import urlparse
+            parsed = urlparse(ntfy_url)
+            ntfy_server = f"{parsed.scheme}://{parsed.netloc}"
+            ntfy_topic = parsed.path.strip("/")
+            if ntfy_topic:
+                start = time.time()
+                test_url = f"{ntfy_server}/{ntfy_topic}"
+                ntfy_token = (getattr(config, "ntfy_token", None) or "").strip()
+                headers = {}
+                if ntfy_token:
+                    headers["Authorization"] = f"Bearer {ntfy_token}"
+                if send_test:
+                    resp = requests.post(test_url, data="[Connectivity Test] DSA probe",
+                                       headers=headers, timeout=TIMEOUT)
+                else:
+                    resp = requests.head(test_url, timeout=TIMEOUT, allow_redirects=True)
+                latency = time.time() - start
+                ok = resp.status_code in (200, 201, 204, 302, 404)
+                results.append(CheckResult("Notification", "ntfy", _netloc(ntfy_server),
+                                          "PASS" if ok else "FAIL",
+                                          latency_s=latency, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}"))
             else:
-                resp = requests.head(test_url, timeout=TIMEOUT, allow_redirects=True)
-            latency = time.time() - start
-            ok = resp.status_code in (200, 201, 204, 302, 404)  # 404 = topic exists but empty
-            results.append(CheckResult("Notification", "ntfy", _netloc(ntfy_server),
-                                      "PASS" if ok else "FAIL",
-                                      latency_s=latency, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}"))
-        else:
-            results.append(CheckResult("Notification", "ntfy", "—", "SKIP", detail="NTFY_URL not configured"))
-    except Exception:
-        results.append(CheckResult("Notification", "ntfy", "—", "SKIP", detail="ntfy config unavailable"))
+                results.append(CheckResult("Notification", "ntfy", "—", "SKIP", detail="NTFY_URL has no topic path"))
+        except Exception:
+            results.append(CheckResult("Notification", "ntfy", "—", "SKIP", detail="ntfy config unavailable"))
+    else:
+        results.append(CheckResult("Notification", "ntfy", "—", "SKIP", detail="NTFY_URL not configured"))
 
     # Gotify
-    try:
-        from src.notification_contracts import resolve_gotify_message_endpoint
-        gotify_ep = resolve_gotify_message_endpoint(getattr(config, "gotify_url", None))
-        gotify_token = getattr(config, "gotify_token", None)
-        if gotify_ep and (gotify_token or "").strip():
+    gotify_url = getattr(config, "gotify_url", None)
+    gotify_token = (getattr(config, "gotify_token", None) or "").strip()
+    if gotify_url and gotify_token:
+        try:
+            # Gotify message endpoint: {base_url}/message?token={token}
+            from urllib.parse import urlparse
+            parsed = urlparse(gotify_url)
+            gotify_ep = f"{parsed.scheme}://{parsed.netloc}/message"
             start = time.time()
             headers = {"X-Gotify-Key": gotify_token}
             if send_test:
@@ -607,10 +641,10 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
             results.append(CheckResult("Notification", "Gotify", _netloc(gotify_ep),
                                       "PASS" if ok else "FAIL",
                                       latency_s=latency, detail=f"HTTP {resp.status_code}{' (+test sent)' if send_test else ''}"))
-        else:
-            results.append(CheckResult("Notification", "Gotify", "—", "SKIP", detail="GOTIFY_URL/TOKEN not configured"))
-    except Exception:
-        results.append(CheckResult("Notification", "Gotify", "—", "SKIP", detail="gotify config unavailable"))
+        except Exception:
+            results.append(CheckResult("Notification", "Gotify", "—", "SKIP", detail="gotify config unavailable"))
+    else:
+        results.append(CheckResult("Notification", "Gotify", "—", "SKIP", detail="GOTIFY_URL/TOKEN not configured"))
 
     # PushPlus
     pp_token = getattr(config, "pushplus_token", None)
@@ -657,30 +691,115 @@ def check_notification_channels(config, *, send_test: bool = False) -> List[Chec
 
     # Custom webhook
     custom_urls = getattr(config, "custom_webhook_urls", None)
+    custom_bearer = getattr(config, "custom_webhook_bearer_token", None)
     if custom_urls:
         for i, url in enumerate(custom_urls if isinstance(custom_urls, list) else [custom_urls]):
-            results.append(_probe_webhook(f"Custom[{i}]", url, send_test=send_test))
+            # Add bearer token in --send-test mode if configured
+            json_body = None
+            if send_test and custom_bearer:
+                json_body = {"content": "[Connectivity Test] DSA probe"}
+                # _probe_webhook doesn't support custom headers, so we handle inline
+                start = time.time()
+                try:
+                    resp = requests.post(url, json=json_body, timeout=TIMEOUT,
+                                       headers={"Content-Type": "application/json",
+                                               "Authorization": f"Bearer {custom_bearer}"})
+                    latency = time.time() - start
+                    if resp.status_code in (200, 201, 204):
+                        results.append(CheckResult("Notification", f"Custom[{i}]", _netloc(url), "PASS",
+                                                  latency_s=latency, detail="HTTP 200 (+test sent)"))
+                    else:
+                        results.append(CheckResult("Notification", f"Custom[{i}]", _netloc(url), "FAIL",
+                                                  latency_s=latency, detail=f"HTTP {resp.status_code}"))
+                except Exception as exc:
+                    results.append(CheckResult("Notification", f"Custom[{i}]", _netloc(url), "FAIL",
+                                              latency_s=time.time() - start, detail=_short_error(exc, custom_bearer)))
+            else:
+                results.append(_probe_webhook(f"Custom[{i}]", url, send_test=send_test))
     else:
         results.append(CheckResult("Notification", "Custom", "—", "SKIP", detail="CUSTOM_WEBHOOK_URLS not configured"))
 
-    # Discord
+    # Discord (webhook OR bot_token + channel_id)
     discord_url = getattr(config, "discord_webhook_url", None)
+    discord_bot = getattr(config, "discord_bot_token", None)
+    discord_chan = getattr(config, "discord_main_channel_id", None)
     if discord_url:
         results.append(_probe_discord_slack("Discord", discord_url, send_test=send_test))
+    elif discord_bot and discord_chan:
+        # Bot API mode — probe Discord API gateway
+        start = time.time()
+        try:
+            resp = requests.get("https://discord.com/api/v10/users/@me",
+                              headers={"Authorization": f"Bot {discord_bot}"}, timeout=TIMEOUT)
+            latency = time.time() - start
+            if resp.status_code == 200:
+                results.append(CheckResult("Notification", "Discord", "discord.com", "PASS",
+                                          latency_s=latency, detail="Bot API OK (+test sent)" if send_test else "Bot API OK"))
+            else:
+                results.append(CheckResult("Notification", "Discord", "discord.com", "FAIL",
+                                          latency_s=latency, detail=f"HTTP {resp.status_code}"))
+        except Exception as exc:
+            results.append(CheckResult("Notification", "Discord", "discord.com", "FAIL",
+                                      latency_s=time.time() - start, detail=_short_error(exc, discord_bot)))
     else:
-        results.append(CheckResult("Notification", "Discord", "—", "SKIP", detail="DISCORD_WEBHOOK_URL not configured"))
+        results.append(CheckResult("Notification", "Discord", "—", "SKIP", detail="DISCORD_WEBHOOK_URL or DISCORD_BOT_TOKEN+CHANNEL_ID not configured"))
 
-    # Slack
+    # Slack (webhook OR bot_token + channel_id)
     slack_url = getattr(config, "slack_webhook_url", None)
+    slack_bot = getattr(config, "slack_bot_token", None)
+    slack_chan = getattr(config, "slack_channel_id", None)
     if slack_url:
         results.append(_probe_discord_slack("Slack", slack_url, send_test=send_test))
+    elif slack_bot and slack_chan:
+        # Bot API mode — probe Slack auth.test
+        start = time.time()
+        try:
+            resp = requests.post("https://slack.com/api/auth.test",
+                               headers={"Authorization": f"Bearer {slack_bot}"}, timeout=TIMEOUT)
+            latency = time.time() - start
+            d = resp.json()
+            if d.get("ok"):
+                results.append(CheckResult("Notification", "Slack", "slack.com", "PASS",
+                                          latency_s=latency, detail="Bot API OK" + (" (+test sent)" if send_test else "")))
+            else:
+                results.append(CheckResult("Notification", "Slack", "slack.com", "FAIL",
+                                          latency_s=latency, detail=f"API error: {d.get('error', 'unknown')}"))
+        except Exception as exc:
+            results.append(CheckResult("Notification", "Slack", "slack.com", "FAIL",
+                                      latency_s=time.time() - start, detail=_short_error(exc, slack_bot)))
     else:
-        results.append(CheckResult("Notification", "Slack", "—", "SKIP", detail="SLACK_WEBHOOK_URL not configured"))
+        results.append(CheckResult("Notification", "Slack", "—", "SKIP", detail="SLACK_WEBHOOK_URL or SLACK_BOT_TOKEN+CHANNEL_ID not configured"))
 
     # AstrBot
     astr_url = getattr(config, "astrbot_url", None)
+    astr_token = getattr(config, "astrbot_token", None)
     if astr_url:
-        results.append(_probe_webhook("AstrBot", astr_url, send_test=send_test))
+        if send_test and astr_token:
+            # AstrBot requires HMAC signature (X-Signature + X-Timestamp)
+            # Replicate the signing logic from astrbot_sender.py
+            import hashlib, hmac
+            start = time.time()
+            try:
+                payload = {"content": "[Connectivity Test] DSA probe"}
+                timestamp = str(int(time.time()))
+                payload_json = json.dumps(payload, sort_keys=True)
+                sign_data = f"{timestamp}.{payload_json}".encode('utf-8')
+                signature = hmac.new(astr_token.encode('utf-8'), sign_data, hashlib.sha256).hexdigest()
+                resp = requests.post(astr_url, json=payload, timeout=TIMEOUT,
+                                   headers={"Content-Type": "application/json",
+                                           "X-Signature": signature, "X-Timestamp": timestamp})
+                latency = time.time() - start
+                if resp.status_code in (200, 201, 204):
+                    results.append(CheckResult("Notification", "AstrBot", _netloc(astr_url), "PASS",
+                                              latency_s=latency, detail="Signed send OK (+test sent)"))
+                else:
+                    results.append(CheckResult("Notification", "AstrBot", _netloc(astr_url), "FAIL",
+                                              latency_s=latency, detail=f"HTTP {resp.status_code}"))
+            except Exception as exc:
+                results.append(CheckResult("Notification", "AstrBot", _netloc(astr_url), "FAIL",
+                                          latency_s=time.time() - start, detail=_short_error(exc, astr_token)))
+        else:
+            results.append(_probe_webhook("AstrBot", astr_url, send_test=send_test))
     else:
         results.append(CheckResult("Notification", "AstrBot", "—", "SKIP", detail="ASTRBOT_URL not configured"))
 
