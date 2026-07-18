@@ -165,11 +165,12 @@ class BaostockFetcher(BaseFetcher):
         if exchange_hint in ('sh', 'sz') and code.isdigit() and len(code) == 6:
             return f"{exchange_hint}.{code}"
         
-        # ETF: Shanghai ETF (51xx, 52xx, 56xx, 58xx) -> sh; Shenzhen ETF (15xx, 16xx, 18xx) -> sz
+        # Fund (ETF + LOF): Shanghai ETF (51/52/56/58/588/589) + LOF (501/502/506) -> sh
+        #                    Shenzhen ETF/LOF (15/16) -> sz
         if len(code) == 6:
-            if code.startswith(('51', '52', '56', '58')):
+            if code.startswith(('51', '52', '56', '58', '501', '502', '506', '588', '589')):
                 return f"sh.{code}"
-            if code.startswith(('15', '16', '18')):
+            if code.startswith(('15', '16')):
                 return f"sz.{code}"
 
         # 根据代码前缀判断市场

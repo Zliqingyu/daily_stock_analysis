@@ -95,23 +95,60 @@ _etf_realtime_cache: Dict[str, Any] = {
 }
 
 
-def _is_etf_code(stock_code: str) -> bool:
+def _is_lof_code(stock_code: str) -> bool:
     """
-    判断代码是否为 ETF 基金
-    
-    ETF 代码规则：
-    - 上交所 ETF: 51xxxx, 52xxxx, 56xxxx, 58xxxx
-    - 深交所 ETF: 15xxxx, 16xxxx, 18xxxx
-    
+    判断代码是否为 LOF 基金（上市型开放式基金）。
+
+    LOF 与 ETF 虽然都在交易所挂牌，但 API 端点不同：
+    - LOF 使用 ak.fund_lof_hist_em()
+    - ETF 使用 ak.fund_etf_hist_em()
+
+    代码段（权威分类，互斥于 _is_etf_code，基于 akshare 实际挂牌数据）：
+    - 深交所 LOF: 160xxx-169xxx (160/161/162/163/164/165/166/167/168/169)
+    - 上交所 LOF: 501xxx, 502xxx, 506xxx
+
+    若 ak.fund_lof_hist_em() 返回空或异常，调用方回退到 ETF 接口。
+
     Args:
         stock_code: 股票/基金代码
-        
+
     Returns:
-        True 表示是 ETF 代码，False 表示是普通股票代码
+        True 表示是 LOF 代码
     """
-    etf_prefixes = ('51', '52', '56', '58', '15', '16', '18')
     code = stock_code.strip().split('.')[0]
-    return code.startswith(etf_prefixes) and len(code) == 6
+    if len(code) != 6 or not code.isdigit():
+        return False
+    return code.startswith(('16', '501', '502', '506'))
+
+
+def _is_etf_code(stock_code: str) -> bool:
+    """
+    判断代码是否为 ETF 基金。
+
+    ETF 代码段（权威分类，互斥于 _is_lof_code，基于 akshare 实际挂牌数据）：
+    - 深交所 ETF: 159xxx
+    - 上交所 ETF: 510xxx-518xxx, 520xxx, 526xxx, 530xxx,
+                  560xxx-563xxx, 588xxx-589xxx
+
+    注意：_is_lof_code 在 _is_etf_code 之前调用，16xxxx 和 501/502/506
+    不会落到这里。18xxxx 为传统封闭式基金，不是 ETF。
+
+    Args:
+        stock_code: 股票/基金代码
+
+    Returns:
+        True 表示是 ETF 代码
+    """
+    code = stock_code.strip().split('.')[0]
+    if len(code) != 6 or not code.isdigit():
+        return False
+    return code.startswith((
+        '159',                                          # Shenzhen ETF
+        '510', '511', '512', '513', '514', '515', '516', '517', '518',  # Shanghai ETF
+        '520', '526', '530',                            # Shanghai ETF
+        '560', '561', '562', '563',                     # Shanghai ETF
+        '588', '589',                                   # Shanghai STAR ETF
+    ))
 
 
 def _is_hk_code(stock_code: str) -> bool:
@@ -472,6 +509,8 @@ class AkshareFetcher(BaseFetcher):
             )
         elif _is_hk_code(stock_code):
             return self._fetch_hk_data(stock_code, start_date, end_date)
+        elif _is_lof_code(stock_code):
+            return self._fetch_lof_data(stock_code, start_date, end_date)
         elif _is_etf_code(stock_code):
             return self._fetch_etf_data(stock_code, start_date, end_date)
         else:
@@ -648,6 +687,65 @@ class AkshareFetcher(BaseFetcher):
         except Exception as e:
             raise e
     
+    def _fetch_lof_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        获取 LOF 基金历史数据，空响应或异常时回退到 ETF 接口。
+
+        LOF 与部分 ETF 共用 16xxxx 号段，ak.fund_lof_hist_em() 对某些代码
+        可能返回空 DataFrame（该代码实际是 ETF）。因此空响应也需 fallback。
+
+        fallback 到 _fetch_etf_data 时，后者会再调一次 _enforce_rate_limit。
+        这不是重复——两次 API 调用之间确实需要间隔（LOF 调用消耗了时间，
+        但不足以保证安全间隔）。
+
+        Args:
+            stock_code: LOF 代码，如 '161116', '501018'
+            start_date: 开始日期，格式 'YYYY-MM-DD'
+            end_date: 结束日期，格式 'YYYY-MM-DD'
+
+        Returns:
+            LOF 或回退 ETF 的历史数据 DataFrame
+        """
+        import akshare as ak
+
+        self._set_random_user_agent()
+        self._enforce_rate_limit()
+
+        logger.info(f"[API调用] ak.fund_lof_hist_em(symbol={stock_code}, period=daily, "
+                     f"start_date={start_date.replace('-', '')}, end_date={end_date.replace('-', '')}, adjust=qfq)")
+
+        import time as _time
+        api_start = _time.time()
+
+        try:
+            df = ak.fund_lof_hist_em(
+                symbol=stock_code,
+                period="daily",
+                start_date=start_date.replace('-', ''),
+                end_date=end_date.replace('-', ''),
+                adjust="qfq",
+            )
+
+            api_elapsed = _time.time() - api_start
+
+            if df is not None and not df.empty:
+                logger.info(f"[API返回] ak.fund_lof_hist_em 成功: 返回 {len(df)} 行数据, 耗时 {api_elapsed:.2f}s")
+                return df
+
+            # 空响应：该代码可能是 ETF 而非 LOF，回退到 ETF 接口
+            logger.warning(f"[API返回] ak.fund_lof_hist_em 返回空数据, 耗时 {api_elapsed:.2f}s, 回退 ETF 接口: {stock_code}")
+            return self._fetch_etf_data(stock_code, start_date, end_date)
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            if any(keyword in error_msg for keyword in ['banned', 'blocked', '频率', 'rate', '限制']):
+                logger.warning(f"检测到可能被封禁: {e}")
+                raise RateLimitError(f"Akshare 可能被限流: {e}") from e
+
+            # 异常：回退到 ETF 接口
+            logger.warning(f"[数据源] LOF API 异常, 回退 ETF API: {stock_code} ({e})")
+            return self._fetch_etf_data(stock_code, start_date, end_date)
+
     def _fetch_etf_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
         获取 ETF 基金历史数据
@@ -930,7 +1028,7 @@ class AkshareFetcher(BaseFetcher):
             return None
         elif _is_hk_code(stock_code):
             return self._get_hk_realtime_quote(stock_code)
-        elif _is_etf_code(stock_code):
+        elif _is_lof_code(stock_code) or _is_etf_code(stock_code):
             source_key = "akshare_etf"
             if not circuit_breaker.is_available(source_key):
                 logger.info(f"[熔断] 数据源 {source_key} 处于熔断状态，跳过")
@@ -1599,9 +1697,9 @@ class AkshareFetcher(BaseFetcher):
             logger.debug(f"[API跳过] {stock_code} 是港股，无筹码分布数据")
             return None
 
-        # ETF/指数没有筹码分布数据
-        if _is_etf_code(stock_code):
-            logger.debug(f"[API跳过] {stock_code} 是 ETF/指数，无筹码分布数据")
+        # ETF/LOF/指数没有筹码分布数据
+        if _is_lof_code(stock_code) or _is_etf_code(stock_code):
+            logger.debug(f"[API跳过] {stock_code} 是 ETF/LOF/指数，无筹码分布数据")
             return None
         
         try:

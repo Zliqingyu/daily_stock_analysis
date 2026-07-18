@@ -145,8 +145,8 @@ _etf_realtime_cache: Dict[str, Any] = {
     'ttl': 600  # 10分钟缓存有效期
 }
 
-_ETF_SH_PREFIXES = ('51', '52', '56', '58')
-_ETF_SZ_PREFIXES = ('15', '16', '18')
+_ETF_SH_PREFIXES = ('51', '52', '56', '58', '501', '502', '506', '588', '589')
+_ETF_SZ_PREFIXES = ('15', '16')
 
 
 def _is_etf_code(stock_code: str) -> bool:

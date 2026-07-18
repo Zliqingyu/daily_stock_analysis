@@ -149,11 +149,12 @@ class YfinanceFetcher(BaseFetcher):
         # 去除可能的 .SH 后缀
         code = code.replace('.SH', '')
 
-        # ETF: Shanghai ETF (51xx, 52xx, 56xx, 58xx) -> .SS; Shenzhen ETF (15xx, 16xx, 18xx) -> .SZ
+        # Fund (ETF + LOF): Shanghai ETF (51/52/56/58/588/589) + LOF (501/502/506) -> .SS
+        #                    Shenzhen ETF/LOF (15/16) -> .SZ
         if len(code) == 6:
-            if code.startswith(('51', '52', '56', '58')):
+            if code.startswith(('51', '52', '56', '58', '501', '502', '506', '588', '589')):
                 return f"{code}.SS"
-            if code.startswith(('15', '16', '18')):
+            if code.startswith(('15', '16')):
                 return f"{code}.SZ"
 
         # BSE (Beijing Stock Exchange): 8xxxxx, 4xxxxx, 920xxx

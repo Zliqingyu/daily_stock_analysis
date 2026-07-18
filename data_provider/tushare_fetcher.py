@@ -40,24 +40,27 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 
 
-# ETF code prefixes by exchange
-# Shanghai: 51xxxx, 52xxxx, 56xxxx, 58xxxx
-# Shenzhen: 15xxxx, 16xxxx, 18xxxx
-_ETF_SH_PREFIXES = ('51', '52', '56', '58')
-_ETF_SZ_PREFIXES = ('15', '16', '18')
-_ETF_ALL_PREFIXES = _ETF_SH_PREFIXES + _ETF_SZ_PREFIXES
+# Fund code prefixes (ETF + LOF) by exchange
+# Shanghai ETF: 51/52/56/58/588/589, Shanghai LOF: 501/502/506
+# Shenzhen ETF/LOF: 15/16
+_ETF_SH_PREFIXES = ('51', '52', '56', '58', '588', '589')
+_ETF_SZ_PREFIXES = ('15', '16')
+_LOF_SH_PREFIXES = ('501', '502', '506')
+_FUND_SH_PREFIXES = _ETF_SH_PREFIXES + _LOF_SH_PREFIXES
+_FUND_ALL_PREFIXES = _FUND_SH_PREFIXES + _ETF_SZ_PREFIXES
 
 
 def _is_etf_code(stock_code: str) -> bool:
     """
-    Check if the code is an ETF fund code.
+    Check if the code is a fund code (ETF or LOF).
 
-    ETF code ranges:
-    - Shanghai ETF: 51xxxx, 52xxxx, 56xxxx, 58xxxx
-    - Shenzhen ETF: 15xxxx, 16xxxx, 18xxxx
+    Fund code ranges (includes LOF):
+    - Shanghai ETF: 51/52/56/58/588/589
+    - Shanghai LOF: 501/502/506
+    - Shenzhen ETF/LOF: 15/16
     """
     code = normalize_stock_code(stock_code)
-    return code.startswith(_ETF_ALL_PREFIXES) and len(code) == 6
+    return code.startswith(_FUND_ALL_PREFIXES) and len(code) == 6
 
 
 def _is_us_code(stock_code: str) -> bool:
@@ -387,8 +390,8 @@ class TushareFetcher(BaseFetcher):
         if exchange_hint == "BJ":
             return f"{code}.BJ"
 
-        # ETF: determine exchange by prefix
-        if code.startswith(_ETF_SH_PREFIXES) and len(code) == 6:
+        # Fund (ETF + LOF): determine exchange by prefix
+        if code.startswith(_FUND_SH_PREFIXES) and len(code) == 6:
             return f"{code}.SH"
         if code.startswith(_ETF_SZ_PREFIXES) and len(code) == 6:
             return f"{code}.SZ"

@@ -2475,8 +2475,10 @@ class SearchService:
             return {"search_lang": "en", "country": "US"}
         return {}
 
-    # A-share ETF code prefixes (Shanghai 51/52/56/58, Shenzhen 15/16/18)
-    _A_ETF_PREFIXES = ('51', '52', '56', '58', '15', '16', '18')
+    # A-share ETF/LOF fund code prefixes
+    # Shanghai ETF: 51/52/56/58/588/589, Shanghai LOF: 501/502/506
+    # Shenzhen ETF/LOF: 15/16
+    _A_ETF_PREFIXES = ('51', '52', '56', '58', '15', '16', '501', '502', '506', '588', '589')
     _ETF_NAME_KEYWORDS = ('ETF', 'FUND', 'TRUST', 'INDEX', 'TRACKER', 'UNIT')  # US/HK ETF name hints
 
     @staticmethod
