@@ -26,6 +26,7 @@ from enum import Enum
 from src.config import Config, get_config
 from src.enums import ReportType
 from src.market_phase_summary import format_public_market_status_line, format_public_phase_pack_excerpt
+from src.services.decision_signal_summary import format_decision_signal_excerpt
 from src.notification_routing import (
     get_notification_route_config,
     split_notification_route_channels,
@@ -360,6 +361,12 @@ class NotificationService(
             getattr(result, "market_phase_summary", None),
             getattr(result, "analysis_context_pack_overview", None),
             source=getattr(result, "analysis_visibility_source", None) or "evaluator_snapshot",
+            report_language=report_language,
+        )
+
+    def _decision_signal_excerpt(self, result: AnalysisResult, report_language: str) -> str:
+        return format_decision_signal_excerpt(
+            getattr(result, "decision_signal_summary", None),
             report_language=report_language,
         )
 
@@ -875,6 +882,9 @@ class NotificationService(
                     f"**Confidence：{confidence_stars}**",
                     "",
                 ])
+                signal_excerpt = self._decision_signal_excerpt(result, report_language)
+                if signal_excerpt:
+                    report_lines.extend([signal_excerpt, ""])
                 self._append_market_snapshot(report_lines, result)
 
                 # 核心看点
@@ -1024,6 +1034,27 @@ class NotificationService(
             if value.startswith(prefix):
                 return value[len(prefix):]
         return value
+
+    @staticmethod
+    def _coerce_probability(value: Any) -> Optional[int]:
+        """将到达/止损概率统一规范为 0-100 的整数。
+
+        模型可能返回 70 / "70" / "70%" / "70 %" 等形态；非法、越界或非数值返回 None。
+        这样即使模型未严格返回整数，渲染层也能稳定显示概率而非静默丢弃。
+        """
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            num = int(round(float(value)))
+        else:
+            text = str(value).strip().rstrip("%").strip()
+            try:
+                num = int(round(float(text)))
+            except (ValueError, TypeError):
+                return None
+        if 0 <= num <= 100:
+            return num
+        return None
 
     @staticmethod
     def _phase_decision_list(value: Any) -> List[str]:
@@ -1218,11 +1249,23 @@ class NotificationService(
             for r in sorted_results:
                 signal_text, signal_emoji, _ = self._get_signal_level(r)
                 display_name = self._get_display_name(r, report_language)
+                dash = r.dashboard or {}
+                battle = dash.get('battle_plan', {}) or {}
+                sniper = battle.get('sniper_points', {}) or {}
+                prices = []
+                if sniper.get('ideal_buy') and str(sniper['ideal_buy']) not in ('', 'N/A', '-'):
+                    prices.append(f"买入 {sniper['ideal_buy']}")
+                if sniper.get('take_profit') and str(sniper['take_profit']) not in ('', 'N/A', '-'):
+                    prices.append(f"止盈 {sniper['take_profit']}")
+                if sniper.get('stop_loss') and str(sniper['stop_loss']) not in ('', 'N/A', '-'):
+                    prices.append(f"止损 {sniper['stop_loss']}")
+                price_str = f" | {' '.join(prices)}" if prices else ""
                 report_lines.append(
                     f"{signal_emoji} **{display_name}({r.code})**: "
                     f"{signal_text} | "
                     f"{labels['score_label']} {r.sentiment_score} | "
                     f"{localize_trend_prediction(r.trend_prediction, report_language)}"
+                    f"{price_str}"
                 )
             report_lines.extend([
                 "",
@@ -1243,6 +1286,10 @@ class NotificationService(
                     f"## {signal_emoji} {stock_name} ({result.code})",
                     "",
                 ])
+                signal_excerpt = self._decision_signal_excerpt(result, report_language)
+                if signal_excerpt:
+                    report_lines.extend([signal_excerpt, ""])
+
                 # ========== 舆情与基本面概览（放在最前面）==========
                 intel = dashboard.get('intelligence', {}) if dashboard else {}
                 if intel:
@@ -1386,26 +1433,137 @@ class NotificationService(
                     # 狙击点位
                     sniper = battle.get('sniper_points', {})
                     if sniper:
+                        buy_prob = self._coerce_probability(sniper.get('buy_reach_probability'))
+                        target_prob = self._coerce_probability(sniper.get('target_reach_probability'))
+                        stop_prob = self._coerce_probability(sniper.get('stop_reach_probability'))
                         report_lines.extend([
                             f"**📍 {labels['action_points_heading']}**",
                             "",
-                            f"| {labels['action_points_heading']} | {labels['current_price_label']} |",
-                            "|---------|------|",
-                            f"| 🎯 {labels['ideal_buy_label']} | {self._clean_sniper_value(sniper.get('ideal_buy', 'N/A'))} |",
-                            f"| 🔵 {labels['secondary_buy_label']} | {self._clean_sniper_value(sniper.get('secondary_buy', 'N/A'))} |",
-                            f"| 🛑 {labels['stop_loss_label']} | {self._clean_sniper_value(sniper.get('stop_loss', 'N/A'))} |",
-                            f"| 🎊 {labels['take_profit_label']} | {self._clean_sniper_value(sniper.get('take_profit', 'N/A'))} |",
+                            f"| {labels['action_points_heading']} | {labels['current_price_label']} | 概率 | 时间 |",
+                            "|---------|------|------|------|",
+                            f"| 🎯 {labels['ideal_buy_label']} | {self._clean_sniper_value(sniper.get('ideal_buy', 'N/A'))} | {f'{buy_prob}%' if buy_prob is not None else 'N/A'} | {sniper.get('buy_time_horizon', '-')} |",
+                            f"| 🔵 {labels['secondary_buy_label']} | {self._clean_sniper_value(sniper.get('secondary_buy', 'N/A'))} | - | - |",
+                            f"| 🛑 {labels['stop_loss_label']} | {self._clean_sniper_value(sniper.get('stop_loss', 'N/A'))} | {f'{stop_prob}%' if stop_prob is not None else 'N/A'} | {sniper.get('stop_time_horizon', '-')} |",
+                            f"| 🎊 {labels['take_profit_label']} | {self._clean_sniper_value(sniper.get('take_profit', 'N/A'))} | {f'{target_prob}%' if target_prob is not None else '-'} | - |",
                             "",
                         ])
+                        # 显示精确价格
+                        ideal_price = sniper.get('ideal_buy_price')
+                        stop_price = sniper.get('stop_loss_price')
+                        target_price = sniper.get('take_profit_price')
+                        if ideal_price or stop_price or target_price:
+                            report_lines.extend([
+                                f"**💰 精确点位**",
+                                "",
+                            ])
+                            if ideal_price:
+                                report_lines.append(f"- 买入价: {ideal_price} 元")
+                            if stop_price:
+                                report_lines.append(f"- 止损价: {stop_price} 元")
+                            if target_price:
+                                report_lines.append(f"- 止盈卖出价: {target_price} 元")
+                            # 禁止追高线（买入价 +3%）
+                            if ideal_price and isinstance(ideal_price, (int, float)):
+                                no_chase = round(ideal_price * 1.03, 2)
+                                report_lines.append(f"- ⛔ 禁止追高线: {no_chase} 元（+3%），超过此价盈亏比倒挂，请勿追")
+                            report_lines.append("")
                     # 仓位策略
                     position = battle.get('position_strategy', {})
                     if position:
                         report_lines.extend([
                             f"**💰 {labels['suggested_position_label']}**: {position.get('suggested_position', 'N/A')}",
-                            f"- {labels['entry_plan_label']}: {position.get('entry_plan', 'N/A')}",
                             f"- {labels['risk_control_label']}: {position.get('risk_control', 'N/A')}",
                             "",
                         ])
+                        # 显示精确仓位
+                        pos_pct = position.get('position_percentage')
+                        max_pos = position.get('max_position')
+                        risk_reward = position.get('risk_reward_ratio')
+                        if pos_pct or max_pos or risk_reward:
+                            report_lines.extend([
+                                f"**📊 仓位明细**",
+                                "",
+                            ])
+                            if pos_pct:
+                                report_lines.append(f"- 建议总仓位: {pos_pct}%")
+                            if max_pos:
+                                report_lines.append(f"- 最大总仓位: {max_pos}%")
+                            if risk_reward:
+                                report_lines.append(f"- 风险回报比: 1:{risk_reward}")
+                            # 持仓时间
+                            holding_period = position.get('expected_holding_period')
+                            if holding_period:
+                                report_lines.append(f"- 预期持仓时间: {holding_period}")
+                            report_lines.append("")
+
+                        # 分批建仓表格
+                        entry_batches = position.get('entry_batches', [])
+                        if entry_batches and isinstance(entry_batches, list):
+                            report_lines.extend([
+                                f"**📥 分批建仓计划**",
+                                "",
+                                f"| 批次 | 操作 | 仓位占比 | 价格 | 触发条件 |",
+                                f"|------|------|----------|------|----------|",
+                            ])
+                            for batch in entry_batches:
+                                if isinstance(batch, dict):
+                                    report_lines.append(
+                                        f"| {batch.get('batch', '?')} "
+                                        f"| {batch.get('action', '-')} "
+                                        f"| {batch.get('ratio', '-')}% "
+                                        f"| {batch.get('price', '-')} "
+                                        f"| {batch.get('trigger', '-')} |"
+                                    )
+                            report_lines.append("")
+                        elif position.get('entry_plan'):
+                            report_lines.append(f"- **建仓策略**: {position.get('entry_plan')}")
+                            report_lines.append("")
+
+                        # 分批止盈表格
+                        exit_batches = position.get('exit_batches', [])
+                        if exit_batches and isinstance(exit_batches, list):
+                            report_lines.extend([
+                                f"**💰 分批止盈计划**",
+                                "",
+                                f"| 批次 | 操作 | 卖出占比 | 价格 | 触发条件 |",
+                                f"|------|------|----------|------|----------|",
+                            ])
+                            for batch in exit_batches:
+                                if isinstance(batch, dict):
+                                    report_lines.append(
+                                        f"| {batch.get('batch', '?')} "
+                                        f"| {batch.get('action', '-')} "
+                                        f"| {batch.get('ratio', '-')}% "
+                                        f"| {batch.get('price', '-')} "
+                                        f"| {batch.get('trigger', '-')} |"
+                                    )
+                            report_lines.append("")
+                        elif position.get('exit_plan'):
+                            report_lines.append(f"- **止盈策略**: {position.get('exit_plan')}")
+                            report_lines.append("")
+
+                        # 分批止损表格
+                        stop_batches = position.get('stop_loss_batches', [])
+                        if stop_batches and isinstance(stop_batches, list):
+                            report_lines.extend([
+                                f"**🛑 分批止损计划**",
+                                "",
+                                f"| 批次 | 操作 | 减仓占比 | 价格 | 触发条件 |",
+                                f"|------|------|----------|------|----------|",
+                            ])
+                            for batch in stop_batches:
+                                if isinstance(batch, dict):
+                                    report_lines.append(
+                                        f"| {batch.get('batch', '?')} "
+                                        f"| {batch.get('action', '-')} "
+                                        f"| {batch.get('ratio', '-')}% "
+                                        f"| {batch.get('price', '-')} "
+                                        f"| {batch.get('trigger', '-')} |"
+                                    )
+                            report_lines.append("")
+                        elif position.get('stop_loss_plan'):
+                            report_lines.append(f"- **止损策略**: {position.get('stop_loss_plan')}")
+                            report_lines.append("")
                     # 检查清单
                     checklist = battle.get('action_checklist', []) if battle else []
                     if checklist:
@@ -1572,6 +1730,11 @@ class NotificationService(
                 if one_sentence:
                     lines.append(f"📌 **{one_sentence[:80]}**")
                     lines.append("")
+                signal_excerpt = self._decision_signal_excerpt(result, report_language)
+                if signal_excerpt:
+                    lines.append(signal_excerpt)
+                    lines.append("")
+
                 # 重要信息区（舆情+基本面）
                 info_lines = []
 
@@ -1619,6 +1782,15 @@ class NotificationService(
                         points.append(f"🛑{labels['stop_loss_label']}:{stop_loss[:15]}")
                     if take_profit:
                         points.append(f"🎊{labels['take_profit_label']}:{take_profit[:15]}")
+                    buy_prob = self._coerce_probability(sniper.get('buy_reach_probability'))
+                    target_prob = self._coerce_probability(sniper.get('target_reach_probability'))
+                    stop_prob = self._coerce_probability(sniper.get('stop_reach_probability'))
+                    if buy_prob is not None:
+                        points.append(f"📈买入概率:{buy_prob}%")
+                    if target_prob is not None:
+                        points.append(f"🎯目标概率:{target_prob}%")
+                    if stop_prob is not None:
+                        points.append(f"📉止损概率:{stop_prob}%")
                     if points:
                         lines.append(" | ".join(points))
                         lines.append("")
@@ -1778,10 +1950,22 @@ class NotificationService(
             dash = r.dashboard or {}
             core = dash.get('core_conclusion', {}) or {}
             one = (core.get('one_sentence') or r.analysis_summary or '')[:60]
+            # 狙击点位
+            battle = dash.get('battle_plan', {}) or {}
+            sniper = battle.get('sniper_points', {}) or {}
+            prices = []
+            if sniper.get('ideal_buy') and str(sniper['ideal_buy']) not in ('', 'N/A', '-'):
+                prices.append(f"买入 {sniper['ideal_buy']}")
+            if sniper.get('take_profit') and str(sniper['take_profit']) not in ('', 'N/A', '-'):
+                prices.append(f"止盈 {sniper['take_profit']}")
+            if sniper.get('stop_loss') and str(sniper['stop_loss']) not in ('', 'N/A', '-'):
+                prices.append(f"止损 {sniper['stop_loss']}")
+            price_str = f" {' '.join(prices)} |" if prices else ""
             lines.append(
                 f"**{name}({r.code})** {emoji} "
-                f"{signal_text} | "
-                f"{labels['score_label']} {r.sentiment_score} | {one}"
+                f"{signal_text} |"
+                f"{price_str}"
+                f" {labels['score_label']} {r.sentiment_score} | {one}"
             )
         lines.append("")
         lines.append(f"*{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
@@ -1824,6 +2008,10 @@ class NotificationService(
         excerpt = self._public_phase_pack_excerpt(result, report_language)
         if excerpt:
             lines.extend([excerpt, ""])
+
+        signal_excerpt = self._decision_signal_excerpt(result, report_language)
+        if signal_excerpt:
+            lines.extend([signal_excerpt, ""])
 
         self._append_market_snapshot(lines, result)
 
@@ -1890,6 +2078,12 @@ class NotificationService(
             stop_loss = sniper.get('stop_loss', '-')
             take_profit = sniper.get('take_profit', '-')
             lines.append(f"| {ideal_buy} | {stop_loss} | {take_profit} |")
+            # 禁止追高线（买入价 +3%）
+            ideal_price = sniper.get('ideal_buy_price')
+            if ideal_price and isinstance(ideal_price, (int, float)):
+                no_chase = round(ideal_price * 1.03, 2)
+                lines.append("")
+                lines.append(f"⛔ **禁止追高线: {no_chase} 元**（+3%），超过此价盈亏比倒挂，请勿追")
             lines.append("")
 
         # ========== 信号归因分析 ==========
@@ -2726,7 +2920,8 @@ class NotificationService(
 
         if filename is None:
             date_str = datetime.now().strftime('%Y%m%d')
-            filename = f"report_{date_str}.md"
+            suffix = (os.environ.get("DSA_REPORT_FILE_SUFFIX") or "").strip()
+            filename = f"report_{suffix}_{date_str}.md" if suffix else f"report_{date_str}.md"
 
         # 确保 reports 目录存在（使用项目根目录下的 reports）
         reports_dir = Path(__file__).parent.parent / 'reports'
