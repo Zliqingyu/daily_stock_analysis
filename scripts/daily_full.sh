@@ -14,6 +14,7 @@ source .venv/bin/activate
 set -a; source .env 2>/dev/null; set +a
 
 # 自选股: 优先 watchlist.json, fallback 到 .env STOCK_LIST
+STOCKS=""   # 预初始化 (set -u 下未定义即崩, 恢复期 watchlist.json 缺失时曾致每晚静默失败)
 if [ -f data/watchlist.json ]; then
   STOCKS=$(python3 -c "import json; print(','.join(json.load(open('data/watchlist.json'))))" 2>/dev/null)
 fi
