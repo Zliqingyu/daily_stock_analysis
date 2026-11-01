@@ -483,6 +483,10 @@ def _build_portfolio_block(artifacts: PipelineAnalysisArtifacts) -> Optional[Ana
         "price_stale",
         "price_available",
         "cost_method",
+        "stop_loss",
+        "target_price",
+        "held",
+        "instruction",
     )
     items = {
         key: AnalysisContextItem(status=item_status, value=context.get(key))

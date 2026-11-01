@@ -45,21 +45,17 @@ if os.getenv("GITHUB_ACTIONS") != "true" and os.getenv("USE_PROXY", "false").low
     os.environ["http_proxy"] = proxy_url
     os.environ["https_proxy"] = proxy_url
 
-_packaged_import_probe = os.getenv("DSA_PACKAGED_IMPORT_PROBE")
-if _packaged_import_probe:
+if os.getenv("DSA_PACKAGED_ALPHASIFT_IMPORT_PROBE") == "1":
     import importlib
     import sys
 
     try:
-        importlib.import_module(_packaged_import_probe)
+        importlib.import_module("alphasift.dsa_adapter")
     except Exception as exc:
-        print(
-            f"ERROR: packaged import failed for {_packaged_import_probe}: {exc}",
-            file=sys.stderr,
-        )
+        print(f"ERROR: packaged AlphaSift adapter import failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"OK: packaged import succeeded for {_packaged_import_probe}")
+    print("OK: packaged AlphaSift adapter import succeeded")
     sys.exit(0)
 
 import argparse
@@ -429,6 +425,13 @@ def parse_arguments() -> argparse.Namespace:
         help='强制回测（即使已有回测结果也重新计算）'
     )
 
+    parser.add_argument(
+        '--max-runtime',
+        type=float,
+        default=0,
+        help='运行时长上限（秒，0=不限制）。到达后停止分析新股票并发送已完成结果（超时兜底发送）'
+    )
+
     return parser.parse_args()
 
 
@@ -446,8 +449,7 @@ def _compute_trading_day_filter(
         - effective_region '' = all relevant markets closed, skip market review
         - should_skip_all: skip entire run when no stocks and no market review to run
     """
-    force_run = getattr(args, 'force_run', False)
-    if force_run or not getattr(config, 'trading_day_check_enabled', True):
+    if not getattr(config, 'trading_day_check_enabled', True):
         return (stock_codes, None, False)
 
     from src.core.trading_calendar import (
@@ -457,6 +459,14 @@ def _compute_trading_day_filter(
     )
 
     open_markets = get_open_markets_today()
+    if not open_markets:
+        # 今天休市: 若明天开市(周日晚/假期最后一天), 照常运行以产出次日挂单计划
+        tomorrow = get_open_markets_today(day_offset=1)
+        if tomorrow:
+            logger.info("今日休市但明日开市——按次日挂单计划运行")
+            open_markets = tomorrow
+        else:
+            logger.info("今日与明日均休市（长假中），跳过执行。")
     filtered_codes = []
     for code in stock_codes:
         mkt = get_market_for_stock(code)
@@ -627,6 +637,51 @@ def _market_review_report_text(review_result: Any) -> str:
     return review_result if isinstance(review_result, str) else ""
 
 
+def _maybe_append_tavily_global_trends(market_report: str, config: Any) -> str:
+    """把每日 Tavily 全球/港美股板块趋势追加为大盘复盘报告的独立小节。
+
+    仅当 TAVILY_ENABLED=true 且当日板块分析产物存在时追加；以 fail-open 方式处理，
+    任何异常都回退到原报告，不影响大盘复盘主流程。该小节聚焦全球与港美股板块，
+    与报告内已有的 A股「板块主线」不重叠。
+    """
+    try:
+        if (os.getenv("TAVILY_ENABLED", "") or "").strip().lower() not in ("true", "1", "yes"):
+            return market_report
+        date_str = datetime.now().strftime("%Y%m%d")
+        sector_path = Path("reports") / f"sector_analysis_{date_str}.json"
+        if not sector_path.exists():
+            return market_report
+        data = json.loads(sector_path.read_text(encoding="utf-8"))
+        global_sectors = data.get("global_hot_sectors") or []
+        us_hk_sectors = data.get("us_hk_sectors") or {}
+        if not global_sectors and not us_hk_sectors:
+            return market_report
+
+        lines = ["", "---", "", "## 🌐 全球/港美股板块趋势（Tavily）", ""]
+        if global_sectors:
+            lines.append("**全球热门板块**")
+            for s in global_sectors:
+                name = (s.get("sector") or "").strip()
+                trend = (s.get("trend") or "").strip()
+                summary = (s.get("summary") or "").strip()
+                if name:
+                    lines.append(f"- {name}（{trend}）：{summary}")
+        if us_hk_sectors:
+            lines.append("")
+            lines.append("**美股 / 港股板块**")
+            for sector, info in us_hk_sectors.items():
+                if not isinstance(info, dict):
+                    continue
+                trend = (info.get("trend") or "").strip()
+                analysis = (info.get("analysis") or "").strip()
+                if sector:
+                    lines.append(f"- {sector}（{trend}）：{analysis}")
+        return market_report.rstrip() + "\n" + "\n".join(lines)
+    except Exception as exc:
+        logger.warning("追加 Tavily 全球板块趋势小节失败: %s", exc)
+        return market_report
+
+
 def _save_reused_market_review_report(
     notifier: Any,
     market_report: str,
@@ -741,6 +796,7 @@ def run_full_analysis(
         market_context_summary = ""
         market_context_full_report = ""
         market_context_generated_during_stock = False
+        review_result = None
         pipeline = StockAnalysisPipeline(
             config=config,
             max_workers=args.workers,
@@ -749,6 +805,7 @@ def run_full_analysis(
             save_context_snapshot=save_context_snapshot,
             daily_market_context_enabled=should_use_daily_market_context,
             daily_market_context_allow_generate=should_use_daily_market_context,
+            portfolio_context=_load_portfolio_context(),
         )
         if should_use_daily_market_context:
             # Prompt-side context can reuse historical summaries, while full-merge
@@ -777,8 +834,11 @@ def run_full_analysis(
             )
 
         # 1. 运行个股分析
+        # 运行时长上限：到点停止新股票并发送已完成结果（超时兜底发送）
+        max_runtime = getattr(args, 'max_runtime', 0)
         results = pipeline.run(
             stock_codes=stock_codes,
+            max_runtime=max_runtime,
             dry_run=args.dry_run,
             send_notification=not args.no_notify,
             merge_notification=merge_notification,
@@ -804,6 +864,10 @@ def run_full_analysis(
         # Issue #128: 分析间隔 - 在个股分析和大盘分析之间添加延迟
         analysis_delay = getattr(config, 'analysis_delay', 0)
 
+        # 预初始化, 防止某些分支路径跳过赋值导致 UnboundLocalError (2026-09-08 早盘崩溃)
+        can_reuse_market_context = False
+        review_result = None
+
         # 2. 运行大盘复盘（如果启用且不是仅个股模式）
         if should_run_market_review:
             schedule_mode = bool(
@@ -827,6 +891,7 @@ def run_full_analysis(
             )
             if can_skip_market_review:
                 market_report = market_context_full_report or market_context_summary
+                market_report = _maybe_append_tavily_global_trends(market_report, config)
                 logger.info(
                     "复盘上下文可复用，跳过重复大盘复盘并复用上下文内容。"
                 )
@@ -892,11 +957,15 @@ def run_full_analysis(
                 elif not review_result:
                     can_reuse_market_context = False
 
-            # 如果有结果，赋值给 market_report 用于后续飞书文档生成
-            if review_result:
-                market_report = _market_review_report_text(review_result)
-            elif can_reuse_market_context:
-                market_report = market_context_full_report or market_context_summary
+        # 如果有结果，赋值给 market_report 用于后续飞书文档生成
+        if review_result:
+            market_report = _market_review_report_text(review_result)
+        elif can_reuse_market_context:
+            market_report = market_context_full_report or market_context_summary
+
+        # Tavily 全球/港美股板块趋势：作为独立于 A股「板块主线」的补充小节追加
+        if market_report:
+            market_report = _maybe_append_tavily_global_trends(market_report, config)
 
         # Issue #190: 合并推送（个股+大盘复盘）
         if merge_notification and (results or market_report) and not args.no_notify:
@@ -928,6 +997,12 @@ def run_full_analysis(
                 )
 
         logger.info("\n任务执行完成")
+
+        # 运行时长上限触发：已完成结果已发送，直接退出，跳过后续耗时步骤
+        if getattr(pipeline, 'deadline_reached', False):
+            logger.info("⏰ 已到达运行时长上限，发送已完成结果后提前退出。")
+            import os
+            os._exit(0)
 
         # === 新增：生成飞书云文档 ===
         try:
@@ -1007,6 +1082,55 @@ def run_scheduled_analysis(
 ) -> bool:
     """Run scheduled analysis with failures propagated to the scheduler."""
     return run_full_analysis(config, args, stock_codes, raise_errors=True)
+
+
+def _load_portfolio_context():
+    """从组合数据库读取持仓，供分析上下文注入（无数据则 None）。"""
+    try:
+        from src.storage import PortfolioPosition, PortfolioAccount, get_db
+
+        db = get_db()
+        session = db.get_session()
+        try:
+            # 读所有活跃账户的持仓
+            rows = (
+                session.query(PortfolioPosition)
+                .join(PortfolioAccount, PortfolioAccount.id == PortfolioPosition.account_id)
+                .filter(PortfolioAccount.is_active == True)  # noqa: E712
+                .all()
+            )
+            positions = {}
+            for r in rows:
+                code = "".join(c for c in r.symbol if c.isdigit())
+                if not code:
+                    continue
+                if (r.quantity or 0) <= 0:
+                    continue
+                # 同代码多账户取最近更新的
+                if code in positions and (r.updated_at or "") < (positions[code].get("_updated") or ""):
+                    continue
+                positions[code] = {
+                    "symbol": code,
+                    "name": r.symbol,
+                    "quantity": r.quantity,
+                    "avg_cost": r.avg_cost or 0,
+                    "stop_loss": 0,
+                    "target_price": 0,
+                    "last_price": r.last_price or 0,
+                    "market_value": r.market_value_base or 0,
+                    "unrealized_pnl": r.unrealized_pnl_base or 0,
+                    "_updated": str(r.updated_at or ""),
+                }
+
+            for v in positions.values():
+                v.pop("_updated", None)
+
+            return {"positions": positions} if positions else None
+        finally:
+            session.close()
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(f"读取账户持仓失败，按无持仓分析: {exc}")
+        return None
 
 
 def _run_analysis_with_runtime_scheduler_lock(

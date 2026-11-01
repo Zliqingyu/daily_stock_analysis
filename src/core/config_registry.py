@@ -82,7 +82,72 @@ WEB_SETTINGS_HIDDEN_FROM_UI = {
     "USE_PROXY",
     "PROXY_HOST",
     "PROXY_PORT",
+    # --- Workflow/agent 内部配置：不在 Web 设置页展示（.env.example 覆盖测试）---
+    "ALPHASIFT_MACRO_FIRST",
+    "ALPHASIFT_MAX_RESULTS",
+    "ALPHASIFT_SCREEN_ENABLED",
+    "ALPHASIFT_SECTOR_TILT",
+    "ALPHASIFT_STRATEGY",
+    "CONNECTIVITY_TIMEOUT",
+    "TAGENT_API_KEY",
+    "TA_CACHE_DIR",
+    "TA_DEEP_MODEL",
+    "TA_LLM_PROVIDER",
+    "TA_MAX_DEBATE_ROUNDS",
+    "TA_OUTPUT_LANG",
+    "TA_QUICK_MODEL",
+    "TA_RESULTS_DIR",
+    "TA_TIMEOUT_SECONDS",
+    "TA_VENV_PYTHON",
+    "TA_VERBOSE",
+
 }
+
+_DOC_FULL_GUIDE_ENV = [
+    {
+        "label": "完整指南：环境变量完整列表",
+        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#环境变量完整列表",
+    },
+]
+
+_DOC_FULL_GUIDE_SEARCH = [
+    {
+        "label": "完整指南：搜索服务配置",
+        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#搜索服务配置",
+    },
+]
+
+_DOC_FULL_GUIDE_DATA_SOURCE = [
+    {
+        "label": "完整指南：数据源配置",
+        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#数据源配置",
+    },
+]
+
+_DOC_FULL_GUIDE_NOTIFICATION = [
+    {
+        "label": "完整指南：通知渠道配置",
+        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#通知渠道详细配置",
+    },
+]
+
+_DOC_LLM_CONFIG = [
+    {
+        "label": "LLM 配置指南",
+        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/LLM_CONFIG_GUIDE.md",
+    },
+    {
+        "label": "LLM 服务商配置速查",
+        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/llm-providers.md",
+    },
+]
+
+_DOC_CUSTOM_WEBHOOK = [
+    {
+        "label": "完整指南：自定义 Webhook",
+        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#自定义-webhook",
+    },
+]
 
 _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     "STOCK_LIST": {
@@ -677,6 +742,27 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "validation": {},
         "display_order": 6,
     },
+    "ANSPIRE_SEARCH_ENABLED": {
+        "title": "Anspire Search Enabled",
+        "description": "Enable Anspire Search (web/news search) independently of the Anspire OpenAI-compatible LLM gateway. If set, it overrides; otherwise it follows ANSPIRE_LLM_ENABLED (which itself defaults to true).",
+        "category": "data_source",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "true",
+        "options": [],
+        "validation": {},
+        "display_order": 23,
+        "help_key": "settings.data_source.search_api_keys",
+        "examples": [
+            "ANSPIRE_SEARCH_ENABLED=true",
+            "ANSPIRE_SEARCH_ENABLED=false",
+        ],
+        "docs": _DOC_FULL_GUIDE_SEARCH,
+        "warning_codes": [],
+    },
     "ANSPIRE_LLM_BASE_URL": {
         "title": "Anspire LLM Base URL",
         "description": "Anspire OpenAI-compatible gateway. Default: https://open-gateway.anspire.cn/v6; global endpoint: https://open-gateway.anspire.ai/v6.",
@@ -1088,7 +1174,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "MINIMAX_API_KEYS": {
         "title": "MiniMax API Key",
-        "description": "MiniMax API key (search priority: Bocha > Tavily > Brave > SerpAPI > MiniMax > SearXNG).",
+        "description": "MiniMax API key (search priority: Tavily > Brave > Anspire > SerpAPI > MiniMax > SearXNG > Bocha).",
         "category": "data_source",
         "data_type": "string",
         "ui_control": "password",
@@ -4326,52 +4412,6 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-_DOC_FULL_GUIDE_ENV = [
-    {
-        "label": "完整指南：环境变量完整列表",
-        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#环境变量完整列表",
-    },
-]
-
-_DOC_FULL_GUIDE_SEARCH = [
-    {
-        "label": "完整指南：搜索服务配置",
-        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#搜索服务配置",
-    },
-]
-
-_DOC_FULL_GUIDE_DATA_SOURCE = [
-    {
-        "label": "完整指南：数据源配置",
-        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#数据源配置",
-    },
-]
-
-_DOC_FULL_GUIDE_NOTIFICATION = [
-    {
-        "label": "完整指南：通知渠道配置",
-        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#通知渠道详细配置",
-    },
-]
-
-_DOC_LLM_CONFIG = [
-    {
-        "label": "LLM 配置指南",
-        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/LLM_CONFIG_GUIDE.md",
-    },
-    {
-        "label": "LLM 服务商配置速查",
-        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/llm-providers.md",
-    },
-]
-
-_DOC_CUSTOM_WEBHOOK = [
-    {
-        "label": "完整指南：自定义 Webhook",
-        "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/full-guide.md#自定义-webhook",
-    },
-]
-
 _FIELD_HELP_METADATA: Dict[str, Dict[str, Any]] = {
     "ANSPIRE_LLM_ENABLED": {
         "help_key": "settings.ai_model.anspire_llm",
@@ -4380,6 +4420,15 @@ _FIELD_HELP_METADATA: Dict[str, Dict[str, Any]] = {
             "ANSPIRE_API_KEYS=your_anspire_key",
         ],
         "docs": _DOC_LLM_CONFIG,
+        "warning_codes": [],
+    },
+    "ANSPIRE_SEARCH_ENABLED": {
+        "help_key": "settings.data_source.search_api_keys",
+        "examples": [
+            "ANSPIRE_SEARCH_ENABLED=true",
+            "ANSPIRE_SEARCH_ENABLED=false",
+        ],
+        "docs": _DOC_FULL_GUIDE_SEARCH,
         "warning_codes": [],
     },
     "ANSPIRE_LLM_BASE_URL": {

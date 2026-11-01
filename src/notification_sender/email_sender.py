@@ -13,6 +13,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
 from email.header import Header
 from email.utils import formataddr
+import os
 import smtplib
 
 from data_provider.base import normalize_stock_code
@@ -160,10 +161,11 @@ class EmailSender:
         server: Optional[smtplib.SMTP] = None
         
         try:
-            # 生成主题
+            # 生成主题：优先使用调用方传入的 subject；
+            # 未传入时根据正文内容自动区分类型，避免每日多封邮件主题雷同。
             if subject is None:
                 date_str = datetime.now().strftime('%Y-%m-%d')
-                subject = f"📈 股票智能分析报告 - {date_str}"
+                subject = self._derive_email_subject(content, date_str)
             
             # 将 Markdown 转换为简单 HTML
             html_content = markdown_to_html_document(content)
@@ -222,6 +224,24 @@ class EmailSender:
             return False
         finally:
             self._close_server(server)
+
+    def _derive_email_subject(self, content: str, date_str: str) -> str:
+        """根据正文内容推断邮件主题前缀，区分每日多封邮件。
+
+        - 大盘复盘邮件（正文以「# 📈 大盘复盘」开头）-> 【大盘复盘】
+        - 个股决策仪表盘邮件（正文含「决策仪表盘」）-> 【自选股】
+        - 设置了环境变量 EMAIL_SUBJECT_PREFIX 时优先使用（双引擎 AlphaSift 选股邮件用）
+        - 其余保持原默认主题
+        """
+        base = f"📈 股票智能分析报告 - {date_str}"
+        prefix = (os.environ.get("EMAIL_SUBJECT_PREFIX") or "").strip()
+        if not prefix:
+            head = (content or "").lstrip()[:300]
+            if head.startswith("# 📈 大盘复盘") or "大盘复盘" in head[:80]:
+                prefix = "【大盘复盘】"
+            elif "决策仪表盘" in head:
+                prefix = "【自选股】"
+        return f"{prefix}{base}" if prefix else base
 
     def _send_email_with_inline_image(
         self, image_bytes: bytes, receivers: Optional[List[str]] = None

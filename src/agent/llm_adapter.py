@@ -97,6 +97,13 @@ class LLMResponse:
 # Models that auto-return reasoning_content; do NOT send extra_body (may cause 400).
 _AUTO_THINKING_MODELS: List[str] = ["deepseek-reasoner", "deepseek-r1", "qwq"]
 
+# --- 渠道熔断器: 429 限流的模型冷却跳过, 避免每次调用都重撞死渠道 (2026-09-08) ---
+# wire_model -> cooldown-until epoch 秒; 普通限流(RPM)冷却 10 分钟
+_CHANNEL_COOLDOWN: Dict[str, float] = {}
+# wire_model -> 'YYYYmmdd'; 日配额(RPD)耗尽则拉黑到第二天
+_CHANNEL_DAILY_BLOCK: Dict[str, str] = {}
+_RATE_LIMIT_COOLDOWN_SECONDS = 600
+
 # Models that need explicit opt-in via extra_body; payload decoupled from model name.
 _OPT_IN_THINKING_MODELS: Dict[str, dict] = {
     "deepseek-chat": {"thinking": {"type": "enabled"}},
@@ -289,10 +296,15 @@ def get_thinking_extra_body(model: str) -> Optional[dict]:
       Return None to avoid duplicate activation.
     - Opt-in models (_OPT_IN_THINKING_MODELS: deepseek-chat): Return the activation
       payload to explicitly enable thinking mode.
+    - GLM models (z.ai): thinking is ON by default and burns max_tokens on
+      reasoning_content — with big JSON outputs this exhausts the budget and
+      returns empty content (verified 2026-09-08). Explicitly disable.
     - All other models: Return None (no thinking mode).
     """
     if _model_matches(model, _AUTO_THINKING_MODELS):
         return None
+    if model and model.lower().strip().startswith("glm"):
+        return {"thinking": {"type": "disabled"}}
     return _get_opt_in_payload(model, _OPT_IN_THINKING_MODELS)
 
 
@@ -616,7 +628,19 @@ class LLMToolAdapter:
 
         last_error = None
         hit_rate_limit = False
+        today = time.strftime("%Y%m%d")
         for idx, model in enumerate(models_to_try):
+            # 熔断检查: 冷却中/日配额耗尽的模型直接跳过, 不再重撞
+            if _CHANNEL_DAILY_BLOCK.get(model) == today:
+                logger.warning("Agent LLM: skip %s (daily quota exhausted, blocked until tomorrow)", model)
+                continue
+            cooldown_until = _CHANNEL_COOLDOWN.get(model, 0)
+            if cooldown_until > time.time():
+                logger.warning(
+                    "Agent LLM: skip %s (rate-limit cooldown, %.0fs left)",
+                    model, cooldown_until - time.time(),
+                )
+                continue
             remaining_timeout = timeout
             if timeout is not None and timeout > 0:
                 remaining_timeout = max(0.0, float(timeout) - (time.time() - started_at))
@@ -639,6 +663,13 @@ class LLMToolAdapter:
                     logger.warning("Agent LLM rate-limited on %s: %s", model, e)
                     last_error = e
                     hit_rate_limit = True
+                    # 熔断: 日配额耗尽拉黑到明天; 普通 RPM 限流冷却 10 分钟
+                    err_text = str(e).lower()
+                    if "per day" in err_text or "perday" in err_text or "rpd" in err_text or "daily" in err_text:
+                        _CHANNEL_DAILY_BLOCK[model] = time.strftime("%Y%m%d")
+                        logger.warning("Agent LLM: %s daily quota exhausted, blocked until tomorrow", model)
+                    else:
+                        _CHANNEL_COOLDOWN[model] = time.time() + _RATE_LIMIT_COOLDOWN_SECONDS
 
                     # Avoid blind backoff across different providers; cross-provider
                     # fallback usually means different accounts/rate-limit buckets.

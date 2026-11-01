@@ -13,6 +13,7 @@ A股自选股智能分析系统 - AI分析层
 import json
 import logging
 import math
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -104,6 +105,33 @@ from src.market_phase_prompt import format_market_phase_prompt_section
 from src.market_structure_prompt import format_market_structure_prompt_section
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_llm_json_wrapper(text: str) -> str:
+    """Remove JSON wrapper that some LLMs add around free-form text.
+
+    e.g. {"report": "## ..."} -> "## ..."
+    Also unescapes literal \\n sequences back to real newlines.
+    """
+    if not text:
+        return text
+    text = text.strip()
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            import json as _json
+            from json_repair import repair_json as _repair
+            parsed = _json.loads(_repair(text))
+            if isinstance(parsed, dict):
+                for key in ("report", "markdown_report", "content", "text", "result"):
+                    val = parsed.get(key)
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+                for val in parsed.values():
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+        except Exception:
+            pass
+    return text
 
 
 def _localized_text(language: Any, *, en: str, zh: str, ko: str) -> str:
@@ -1899,7 +1927,7 @@ class GeminiAnalyzer:
     "stock_name": "股票中文名称",
     "sentiment_score": 0-100整数,
     "trend_prediction": "强烈看多/看多/震荡/看空/强烈看空",
-    "operation_advice": "买入/加仓/持有/减仓/卖出/观望",
+    "operation_advice": "建仓/加仓/持有/减仓/卖出/观望/等待入场/回避",
     "decision_type": "buy/hold/sell",
     "action": "buy/add/hold/reduce/sell/watch/avoid/alert",
     "guardrail_reason": "当分数区间与最终 action 不一致时填写降级/升级原因，否则留空",
@@ -1956,18 +1984,51 @@ class GeminiAnalyzer:
 
         "battle_plan": {
             "sniper_points": {
-                "ideal_buy": "理想买入点：XX元（在MA5附近）",
-                "secondary_buy": "次优买入点：XX元（在MA10附近）",
-                "stop_loss": "止损位：XX元（跌破MA20或X%）",
-                "take_profit": "目标位：XX元（前高/整数关口）"
+                "ideal_buy": "回落买入位：XX元（在MA5附近，限价挂单等回落，稳健保守用）",
+                "ideal_buy_price": 数值型买入价(如1203.50),
+                "breakout_buy": "突破买入位：XX元（站上关键阻力/前高即追，强势确认时用；若现价距回落买入位<1%或趋势强，明确提示直接用突破单以免踏空）",
+                "breakout_buy_price": 数值型突破买入价(如1210.00),
+                "entry_advice": "入场建议：根据当前动能二选一（强势/量能配合→突破单；震荡/超买→回落单），并给出一句话理由",
+                "secondary_buy": "次优建仓位：XX元（在MA10附近）",
+                "secondary_buy_price": 数值型次优买入价(如1195.00),
+                "stop_loss": "清仓止损位：XX元（跌破此价位清仓全部卖出，跌破MA20或X%）",
+                "stop_loss_price": 数值型止损价(如1180.00),
+                "take_profit": "全部止盈位：XX元（达到此价位清仓全部卖出止盈，参考前高/整数关口/阻力位）",
+                "take_profit_price": 数值型目标价(如1280.00),
+                "buy_reach_probability": "买入到达概率，必填整数0-100（例如70表示70%概率触及买入点）。必须基于买入价与当前价的空间、支撑位强度、近期波动率与时间窗口真实估算，禁止随意填写或编造数值；若缺乏依据应如实估低而非给虚高值。",
+                "buy_time_horizon": "到达时间范围(如3-5个交易日)",
+                "target_reach_probability": "目标价到达概率，必填整数0-100（例如50表示50%概率触及目标价）。必须基于当前价与目标价的空间、阻力位强度、波动率与持有时间窗口真实估算；依据不足时如实估低。",
+                "stop_reach_probability": "止损触发概率，必填整数0-100（例如15表示15%概率触发止损）。必须基于当前价与止损位的空间、支撑强度、波动率真实估算，禁止编造；依据不足时如实估低。",
+                "stop_time_horizon": "止损观察周期(如本周内)"
             },
             "position_strategy": {
-                "suggested_position": "建议仓位：X成",
+                "suggested_position": "建议总仓位：X成（如3成=30%）",
+                "position_percentage": 建议总仓位百分比(如30),
+                "max_position": 最大总仓位百分比(如50),
                 "entry_plan": "分批建仓策略描述",
-                "risk_control": "风控策略描述"
+                "entry_batches": [
+                    {"batch": 1, "action": "建仓", "ratio": "首批仓位占比，如40", "price": 数值型价格(如1203.50), "trigger": "触发条件(如回踩MA5确认)"},
+                    {"batch": 2, "action": "加仓", "ratio": "次批仓位占比，如35", "price": 数值型价格(如1198.00), "trigger": "触发条件(如缩量回调至1198)"},
+                    {"batch": 3, "action": "加仓", "ratio": "末批仓位占比，如25", "price": 数值型价格(如1190.00), "trigger": "触发条件(如二次回踩1190获支撑)"}
+                ],
+                "exit_plan": "分批止盈+止损策略描述",
+                "exit_batches": [
+                    {"batch": 1, "action": "减仓止盈", "ratio": "卖出仓位占比，如30", "price": 数值型价格(如1250.00), "trigger": "触发条件(如触及第一阻力位)"},
+                    {"batch": 2, "action": "减仓止盈", "ratio": "卖出仓位占比，如30", "price": 数值型价格(如1280.00), "trigger": "触发条件(如放量突破前高)"},
+                    {"batch": 3, "action": "清仓止盈", "ratio": "剩余全部清仓，如40", "price": 数值型价格(如1320.00), "trigger": "触发条件(如极端超买或趋势走弱)"}
+                ],
+                "stop_loss_plan": "分批止损策略描述",
+                "stop_loss_batches": [
+                    {"batch": 1, "action": "减仓止损", "ratio": "减仓占比，如50", "price": 数值型价格(如1185.00), "trigger": "触发条件(如跌破MA10)"},
+                    {"batch": 2, "action": "清仓止损", "ratio": "剩余全部清仓，如50", "price": 数值型价格(如1180.00), "trigger": "触发条件(如跌破MA20或放量下跌)"}
+                ],
+                "risk_control": "风控策略描述",
+                "risk_reward_ratio": 风险回报比(如2.5),
+                "expected_holding_days": 预期持仓天数(如30-90),
+                "expected_holding_period": "预期持仓时间，必须标明短线/中线/长线（如「中线，预计1-3个月」或「短线，1-2周」或「长线，3-6个月」）。选股策略为动量质量(momentum_quality)时默认中线持仓(1-3个月)，除非趋势加速可缩短。"
             },
             "action_checklist": [
-                "✅/⚠️/❌ 检查项1：多头排列",
+                "✅/⚠️/❌ 检查项1：趋势方向与量价结构支持结论",
                 "✅/⚠️/❌ 检查项2：乖离率合理（强势趋势可放宽）",
                 "✅/⚠️/❌ 检查项3：量能配合",
                 "✅/⚠️/❌ 检查项4：无重大利空",
@@ -2052,8 +2113,8 @@ class GeminiAnalyzer:
 
 ## 决策仪表盘核心原则
 
-1. **核心结论先行**：一句话说清该买该卖
-2. **分持仓建议**：空仓者和持仓者给不同建议
+1. **核心结论先行**：一句话说清该建仓还是该回避
+2. **分持仓建议**：空仓者和持仓者给不同建议（空仓者侧重入场时机和价位，持仓者侧重加仓/持有/减仓）
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
 5. **风险优先级**：舆情中的风险点要醒目标出
@@ -2062,12 +2123,14 @@ class GeminiAnalyzer:
 
 - 不得仅因为单日涨跌或评分跨线就在“买入/卖出”之间剧烈切换。
 - 操作建议必须同时参考价格位置（支撑/压力位）、量能/筹码、主力资金流向和风险事件。
-- 股价位于支撑与压力之间、资金流不明确时，优先输出“持有/震荡/观望/洗盘观察”等可执行的中性建议；`decision_type` 仍保持 `hold`。
-- 只有在接近支撑确认或有效突破压力，且资金流/量价配合时，才能给出买入；接近压力且资金流出时不得追买。
-- 只有在跌破关键支撑、主力资金持续流出或风险显著放大时，才能给出卖出/减仓。
+- 股价位于支撑与压力之间、资金流不明确时，优先输出"观望/等待入场信号/震荡观察"等可执行的中性建议；`decision_type` 仍保持 `hold`。
+- 价格回落至支撑附近但资金未确认流出时，按「洗盘观察」处理：不追高、不轻易止损，等待量价确认。
+- 只有在接近支撑确认或有效突破压力，且资金流/量价配合时，才能给出买入（建仓）；接近压力且资金流出时不得追买。
+- 只有在跌破关键支撑、主力资金持续流出或风险显著放大时，才能给出卖出/减仓/离场。
 - 必须输出 `dashboard.phase_decision` 七字段；盘中/午休/临近收盘要给出当前动作、观察条件和下一次检查点。
 - 建议输出可选展示字段 `dashboard.signal_attribution` 六字段；解释推荐理由的构成，包括技术指标、新闻舆情、基本面、市场环境的贡献度，以及最强看多/看空信号。
-- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。"""
+- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。
+- `dashboard.battle_plan.sniper_points` 中的 `buy_reach_probability`、`target_reach_probability`、`stop_reach_probability` **必须返回 0-100 的整数**（如 70），不得留空、不得返回字符串描述（如"较高"）、不得返回 null；若数据不足以精确估算，基于波动率和价位距离给出合理估计而非省略。"""
 
     SYSTEM_PROMPT = """你是一位{market_placeholder}投资分析师，负责生成专业的【决策仪表盘】分析报告。
 
@@ -2087,7 +2150,7 @@ class GeminiAnalyzer:
     "stock_name": "股票中文名称",
     "sentiment_score": 0-100整数,
     "trend_prediction": "强烈看多/看多/震荡/看空/强烈看空",
-    "operation_advice": "买入/加仓/持有/减仓/卖出/观望",
+    "operation_advice": "建仓/加仓/持有/减仓/卖出/观望/等待入场/回避",
     "decision_type": "buy/hold/sell",
     "action": "buy/add/hold/reduce/sell/watch/avoid/alert",
     "guardrail_reason": "当分数区间与最终 action 不一致时填写降级/升级原因，否则留空",
@@ -2145,14 +2208,29 @@ class GeminiAnalyzer:
         "battle_plan": {
             "sniper_points": {
                 "ideal_buy": "理想入场位：XX元（满足主要技能触发条件）",
+                "ideal_buy_price": 数值型买入价(如1203.50),
                 "secondary_buy": "次优入场位：XX元（更保守或确认后执行）",
+                "secondary_buy_price": 数值型次优买入价(如1195.00),
                 "stop_loss": "止损位：XX元（失效条件或X%风险）",
-                "take_profit": "目标位：XX元（按阻力位/风险回报比制定）"
+                "stop_loss_price": 数值型止损价(如1180.00),
+                "take_profit": "目标位：XX元（按阻力位/风险回报比制定）",
+                "take_profit_price": 数值型目标价(如1280.00),
+                "buy_reach_probability": "买入到达概率，必填整数0-100（例如70表示70%概率触及买入点）。必须基于买入价与当前价的空间、支撑位强度、近期波动率与时间窗口真实估算，禁止随意填写或编造数值；若缺乏依据应如实估低而非给虚高值。",
+                "buy_time_horizon": "到达时间范围(如3-5个交易日)",
+                "target_reach_probability": "目标价到达概率，必填整数0-100（例如50表示50%概率触及目标价）。必须基于当前价与目标价的空间、阻力位强度、波动率与持有时间窗口真实估算；依据不足时如实估低。",
+                "stop_reach_probability": "止损触发概率，必填整数0-100（例如15表示15%概率触发止损）。必须基于当前价与止损位的空间、支撑强度、波动率真实估算，禁止编造；依据不足时如实估低。",
+                "stop_time_horizon": "止损观察周期(如本周内)"
             },
             "position_strategy": {
                 "suggested_position": "建议仓位：X成",
+                "position_percentage": 建议仓位百分比(如20),
+                "max_position": 最大仓位百分比(如30),
                 "entry_plan": "分批建仓策略描述",
-                "risk_control": "风控策略描述"
+                "entry_batch_1": "首批买入比例和价格(如50%仓位在1203元)",
+                "entry_batch_2": "次批买入比例和价格(如30%仓位在1195元)",
+                "entry_batch_3": "末批买入比例和价格(如20%仓位在1185元)",
+                "risk_control": "风控策略描述",
+                "risk_reward_ratio": 风险回报比(如2.5)
             },
             "action_checklist": [
                 "✅/⚠️/❌ 检查项1：当前结构是否满足激活技能条件",
@@ -2238,8 +2316,8 @@ class GeminiAnalyzer:
 
 ## 决策仪表盘核心原则
 
-1. **核心结论先行**：一句话说清该买该卖
-2. **分持仓建议**：空仓者和持仓者给不同建议
+1. **核心结论先行**：一句话说清该建仓还是该回避
+2. **分持仓建议**：空仓者和持仓者给不同建议（空仓者侧重入场时机和价位，持仓者侧重加仓/持有/减仓）
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
 5. **风险优先级**：舆情中的风险点要醒目标出
@@ -2248,18 +2326,41 @@ class GeminiAnalyzer:
 
 - 不得仅因为单日涨跌或评分跨线就在“买入/卖出”之间剧烈切换。
 - 操作建议必须同时参考价格位置（支撑/压力位）、量能/筹码、主力资金流向和风险事件。
-- 股价位于支撑与压力之间、资金流不明确时，优先输出“持有/震荡/观望/洗盘观察”等可执行的中性建议；`decision_type` 仍保持 `hold`。
-- 只有在接近支撑确认或有效突破压力，且资金流/量价配合时，才能给出买入；接近压力且资金流出时不得追买。
-- 只有在跌破关键支撑、主力资金持续流出或风险显著放大时，才能给出卖出/减仓。
+- 股价位于支撑与压力之间、资金流不明确时，优先输出"观望/等待入场信号/震荡观察"等可执行的中性建议；`decision_type` 仍保持 `hold`。
+- 价格回落至支撑附近但资金未确认流出时，按「洗盘观察」处理：不追高、不轻易止损，等待量价确认。
+- 只有在接近支撑确认或有效突破压力，且资金流/量价配合时，才能给出买入（建仓）；接近压力且资金流出时不得追买。
+- 只有在跌破关键支撑、主力资金持续流出或风险显著放大时，才能给出卖出/减仓/离场。
 - 必须输出 `dashboard.phase_decision` 七字段；盘中/午休/临近收盘要给出当前动作、观察条件和下一次检查点。
 - 建议输出可选展示字段 `dashboard.signal_attribution` 六字段；解释推荐理由的构成，包括技术指标、新闻舆情、基本面、市场环境的贡献度，以及最强看多/看空信号。
-- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。"""
+- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。
+- `dashboard.battle_plan.sniper_points` 中的 `buy_reach_probability`、`target_reach_probability`、`stop_reach_probability` **必须返回 0-100 的整数**（如 70），不得留空、不得返回字符串描述（如"较高"）、不得返回 null；若数据不足以精确估算，基于波动率和价位距离给出合理估计而非省略。
+
+## 关键输出规则（必须严格遵守）
+
+- 你的输出**必须且只能**是一个合法的 JSON 对象
+- **不要**在 JSON 前后添加任何解释性文字、标题、markdown 或自然语言
+- **不要**在 JSON 中使用注释（`//` 或 `/* */`）
+- 直接以 `{` 开始，以 `}` 结束
+- 确保所有字符串值使用双引号，布尔值使用小写 `true`/`false`
+- 数值不要加引号
+- 如果需要换行，请在字符串值中使用 `\n`，不要在 JSON 结构中插入真实换行
+"""
 
     TEXT_SYSTEM_PROMPT = """你是一位专业的股票分析助手。
 
 - 回答必须基于用户提供的数据与上下文
 - 若信息不足，要明确指出不确定性
 - 不要编造价格、财报或新闻事实
+
+## 关键输出规则（必须严格遵守）
+
+- 你的输出**必须且只能**是一个合法的 JSON 对象
+- **不要**在 JSON 前后添加任何解释性文字、标题、markdown 或自然语言
+- **不要**在 JSON 中使用注释（`//` 或 `/* */`）
+- 直接以 `{` 开始，以 `}` 结束
+- 确保所有字符串值使用双引号，布尔值使用小写 `true`/`false`
+- 数值不要加引号
+- 如果需要换行，请在字符串值中使用 `\n`，不要在 JSON 结构中插入真实换行
 """
 
     def __init__(
@@ -2343,12 +2444,165 @@ class GeminiAnalyzer:
             ),
         )
 
+    _portfolio_ctx_cache: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def _get_portfolio_context(cls) -> Dict[str, Any]:
+        """读取组合账本真实持仓+现金 (进程级缓存, 每轮分析只查一次)。失败静默返回空。"""
+        if cls._portfolio_ctx_cache is not None:
+            return cls._portfolio_ctx_cache
+        ctx: Dict[str, Any] = {"cash": 0.0, "positions": {}}
+        try:
+            from src.services.portfolio_service import PortfolioService
+            snap = PortfolioService().get_portfolio_snapshot(include_realtime=False)
+            ctx["cash"] = float(snap.get("total_cash", 0) or 0)
+            for acct in snap.get("accounts") or []:
+                for p in acct.get("positions") or []:
+                    sym = p.get("symbol", "")
+                    ctx["positions"][sym] = {
+                        "quantity": float(p.get("quantity", 0) or 0),
+                        "avg_cost": float(p.get("avg_cost", 0) or 0),
+                    }
+        except Exception as exc:
+            logger.debug("[analyzer] portfolio context unavailable: %s", exc)
+        cls._portfolio_ctx_cache = ctx
+        return ctx
+
+    def _portfolio_context_section(self, stock_code: str) -> str:
+        """构建组合状态 prompt 段: 让 LLM 基于真实持仓/现金给建议。"""
+        try:
+            ctx = self._get_portfolio_context()
+            if not ctx["positions"] and not ctx["cash"]:
+                return ""
+            code = (stock_code or "").strip()
+            holding = ctx["positions"].get(code)
+            if holding and holding["quantity"] > 0:
+                mine = (
+                    f"- 当前状态：**已持有 {code} {holding['quantity']:g} 股，成本 {holding['avg_cost']:.2f} 元**。"
+                    "分析视角应以「继续持有 / 加仓 / 减仓 / 止盈止损」为核心，给出具体操作价位。\n"
+                )
+            else:
+                mine = (
+                    f"- 当前状态：**未持有 {code}**。"
+                    "分析视角应以「是否值得新建仓、入场价位与触发条件」为核心。\n"
+                )
+            other = [s for s in ctx["positions"] if s != code and ctx["positions"][s]["quantity"] > 0]
+            lines = [
+                "\n## 💼 你的真实组合状态（分析必须以此为前提）\n",
+                f"- 账户可用现金：**{ctx['cash']:,.2f} 元**（建议加仓/建仓时评估资金可行性，建议仓位不超过现金的 30%）\n",
+                mine,
+            ]
+            if other:
+                lines.append("- 其他持仓：" + "、".join(
+                    f"{s}({ctx['positions'][s]['quantity']:g}股@{ctx['positions'][s]['avg_cost']:.2f})" for s in sorted(other)
+                ) + "\n")
+            lines.append("- `operation_advice` 必须与上述真实持仓一致：空仓不说「减仓」，持仓不说「建仓」。\n")
+            return "".join(lines)
+        except Exception as exc:
+            logger.debug("[analyzer] portfolio context section skipped: %s", exc)
+            return ""
+
+    _prev_signal_cache: Dict[str, Any] = {}
+
+    @classmethod
+    def _get_previous_signal(cls, stock_code: str) -> Optional[Dict[str, Any]]:
+        """读取该股最近一期 AI 决策信号 (决策信号库, 供连续性对照)。失败静默。"""
+        import threading
+        if not hasattr(cls, "_prev_signal_lock"):
+            cls._prev_signal_lock = threading.Lock()
+        code = (stock_code or "").strip()
+        if not code:
+            return None
+        with cls._prev_signal_lock:
+            if code in cls._prev_signal_cache:
+                return cls._prev_signal_cache[code]
+            try:
+                from src.storage import get_db, DecisionSignalRecord
+                norm = "".join(c for c in code if c.isdigit()) or code
+                db = get_db()
+                session = db.get_session()
+                try:
+                    row = (
+                        session.query(DecisionSignalRecord)
+                        .filter(DecisionSignalRecord.stock_code.like(f"%{norm}%"))
+                        .order_by(DecisionSignalRecord.created_at.desc())
+                        .first()
+                    )
+                finally:
+                    session.close()
+                if row is None:
+                    cls._prev_signal_cache[code] = None
+                    return None
+                sig = {
+                    "action": row.action,
+                    "score": row.score,
+                    "created_at": row.created_at.strftime("%m-%d %H:%M") if row.created_at else "",
+                    "stop_loss": row.stop_loss,
+                    "reason": (row.reason or "")[:150],
+                }
+                cls._prev_signal_cache[code] = sig
+                return sig
+            except Exception as exc:
+                logger.debug("[analyzer] previous signal unavailable: %s", exc)
+                cls._prev_signal_cache[code] = None
+                return None
+
+    def _previous_signal_section(self, stock_code: str) -> str:
+        """构建上期观点 prompt 段: 要求 LLM 与上期结论连续或明确说明转向理由。"""
+        try:
+            sig = self._get_previous_signal(stock_code)
+            if not sig:
+                return ""
+            return (
+                f"\n## 🔄 上期观点对照\n"
+                f"- 上期 ({sig['created_at']}) 结论：**{sig['action']}**，评分 {sig['score']}，"
+                f"止损 {sig['stop_loss'] if sig['stop_loss'] else '未给出'}。"
+                f"理由摘要：{sig['reason']}\n"
+                f"- 本期分析请与上期对照：若维持，需说明数据仍支持；"
+                f"若转向（升/降档），**必须明确指出是哪些新数据/新变化导致的转向**，"
+                f"禁止无理由改口。\n"
+            )
+        except Exception as exc:
+            logger.debug("[analyzer] previous signal section skipped: %s", exc)
+            return ""
+
     def _get_analysis_system_prompt(self, report_language: str, stock_code: str = "") -> str:
         """Build the analyzer system prompt with output-language guidance."""
         lang = normalize_report_language(report_language)
         market_role = get_market_role(stock_code, lang)
         market_guidelines = get_market_guidelines(stock_code, lang)
         skill_instructions, default_skill_policy, use_legacy_default_prompt = self._get_skill_prompt_sections()
+
+        # 持仓状态提示：注入到 prompt 让 LLM 知道默认分析视角
+        position_state = os.getenv("DEFAULT_POSITION_STATE", "").strip().lower()
+        position_context = ""
+        if position_state == "no_position":
+            position_context = (
+                "\n## 持仓状态提示\n\n"
+                "用户默认处于**空仓状态**（未持有该股票）。\n"
+                "- 分析视角应以「是否值得新建仓」为核心，而非预设用户已持仓。\n"
+                "- `operation_advice` 应优先使用：建仓/等待入场/观望/回避。\n"
+                "- **不要默认观望**：即使当前不是理想买点，也必须明确告诉用户理想入场价位、"
+                "需要等待什么条件触发建仓、预计多久可能到达入场价位。\n"
+                "- 推荐的股票和入场价位是给后续交易日参考的（A 股 T+1），"
+                "入场价不等于明天开盘就买，而是说「股价回调/突破到这个位置时可以考虑建仓」。\n"
+                "- 当评分指向买入区间时，给出具体的建仓价位和分批入场计划。\n"
+                "- 当评分指向观望区间时，必须给出触发入场的具体价位和条件（如「回调至XX元可建仓」"
+                "或「突破XX元后回踩确认可追」），而非简单说「观望」。同时明确说明当前不建议立即买入的原因。\n"
+                "- 当评分指向卖出区间时，告知空仓者回避，不要使用「减仓」等预设已持仓的措辞。\n"
+                "- `dashboard.core_conclusion.position_advice.no_position` 是给空仓者的主要建议，"
+                "应比 `has_position` 更详细，必须包含具体价位。\n"
+                "- `buy_reach_probability` 和 `stop_reach_probability` **必须返回 0-100 的整数**，"
+                "不得留空、不得返回描述性文字。若无法精确估算，基于波动率和价位距离给出合理估计。\n"
+            )
+        elif position_state == "has_position":
+            position_context = (
+                "\n## 持仓状态提示\n\n"
+                "用户默认处于**持仓状态**（已持有该股票）。\n"
+                "- 分析视角应以「是否加仓、持有还是减仓」为核心。\n"
+                "- `dashboard.core_conclusion.position_advice.has_position` 是给持仓者的主要建议。\n"
+            )
+
         if use_legacy_default_prompt:
             base_prompt = self.LEGACY_DEFAULT_SYSTEM_PROMPT.replace(
                 "{market_placeholder}", market_role
@@ -2368,6 +2622,7 @@ class GeminiAnalyzer:
                 .replace("{default_skill_policy_section}", default_skill_policy_section)
                 .replace("{skills_section}", skills_section)
             )
+        base_prompt += position_context
         if lang == "en":
             return base_prompt + """
 
@@ -3115,8 +3370,23 @@ class GeminiAnalyzer:
 
         models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
         models_to_try = [m for m in models_to_try if m]
+        logger.info("[LiteLLM] models_to_try (%d): %s", len(models_to_try), models_to_try)
 
         use_channel_router = self._has_channel_config(config)
+
+        # 熔断器: 本运行内已标记不可用的模型直接跳过
+        # (每次 cron 是新进程, 字典随进程退出自动重置)
+        if not hasattr(self, "_llm_model_breaker"):
+            self._llm_model_breaker = {}
+        _break = self._llm_model_breaker
+        _skipped = [m for m in models_to_try if m in _break]
+        for m in _skipped:
+            logger.warning("[LiteLLM] 跳过 %s (本运行已熔断: %s)", m, _break[m])
+        models_to_try = [m for m in models_to_try if m not in _break]
+        if not models_to_try:
+            raise _AllModelsFailedError(
+                "All models are circuit-broken in this run",
+                last_response_text=None, last_model=None, last_usage={})
 
         last_error = None
         last_response_text: Optional[str] = None
@@ -3300,15 +3570,32 @@ class GeminiAnalyzer:
             except Exception as e:
                 safe_error = self._sanitize_litellm_exception_text(e, config=config, model=model)
                 logger.warning("[LiteLLM] %s failed: %s", model, safe_error)
+                # 熔断标记: 只标永久性失败。RATE限流里 "Request too large ... Limit N, Requested M"
+                # 且 M > N 时, 单次请求本身就超限, 等窗口也无用 → 本运行内熔断;
+                # 模型不存在(404)同理。瞬时错误(超时/网络/普通429)不标。
+                err_txt = str(e)
+                _breaker_worthy = isinstance(e, __import__("litellm").NotFoundError)
+                if not _breaker_worthy and "Request too large" in err_txt:
+                    _lm = re.search(r"Limit\s+(\d+)", err_txt)
+                    _rm = re.search(r"Requested\s+(\d+)", err_txt)
+                    if _lm and _rm and int(_rm.group(1)) > int(_lm.group(1)):
+                        _breaker_worthy = True
+                if _breaker_worthy:
+                    if not hasattr(self, "_llm_model_breaker"):
+                        self._llm_model_breaker = {}
+                    self._llm_model_breaker[model] = safe_error[:80]
+                    logger.warning("[LiteLLM] 熔断 %s (本运行内不再尝试)", model)
                 last_error = RuntimeError(f"{type(e).__name__}: {safe_error}")
                 continue
 
+        logger.error("[LiteLLM] All %d models in models_to_try exhausted without success", len(models_to_try))
         raise _AllModelsFailedError(
             f"All LLM models failed (tried {len(models_to_try)} model(s)). Last error: {last_error}",
             last_response_text=last_response_text,
             last_model=last_model,
             last_usage=last_usage,
         )
+
 
     def generate_text(
         self,
@@ -3339,8 +3626,8 @@ class GeminiAnalyzer:
                 text, model_used, usage = result
                 if should_persist_usage_telemetry(usage):
                     persist_llm_usage(usage, model_used, call_type="market_review")
-                return text
-            return result
+                return _strip_llm_json_wrapper(text) if text else text
+            return _strip_llm_json_wrapper(result) if isinstance(result, str) else result
         except GenerationError:
             raise
         except Exception as exc:
@@ -3571,7 +3858,18 @@ class GeminiAnalyzer:
                         model_used = exc.last_model
                         llm_usage = exc.last_usage
                     else:
-                        raise
+                        # 方案B：所有模型均无响应（限流/超时/空响应）。
+                        # 不再整只抛异常被 pipeline 静默丢弃，而是生成降级报告计入汇总，
+                        # 保证「跑过什么就发什么」——deadline 邮件里该股也出现在清单（带失败原因）。
+                        logger.warning(
+                            "[LLM JSON] %s(%s): 所有模型均无响应（限流/超时/空响应），"
+                            "生成降级报告并计入汇总",
+                            name,
+                            code,
+                        )
+                        return self._build_llm_unavailable_result(
+                            code, name, report_language, reason=str(exc)
+                        )
                 elapsed = time.time() - start_time
 
                 # 记录响应信息
@@ -3670,7 +3968,56 @@ class GeminiAnalyzer:
                 model_used=None,
                 report_language=report_language,
             )
-    
+
+    def _build_llm_unavailable_result(
+        self,
+        code: str,
+        name: str,
+        report_language: str,
+        reason: str,
+    ) -> "AnalysisResult":
+        """构造「LLM 不可用」降级结果：所有模型均无响应时仍计入汇总。
+
+        设计意图（方案B）：主分析在 deadline 内被中止时，已跑过的股票必须出现在
+        汇总报告/邮件里。当所有 LLM 模型都无响应（限流/超时/空响应）时，
+        ``_AllModelsFailedError.last_response_text`` 为 None，原本会整只抛异常被
+        pipeline 静默丢弃。这里返回一个 ``success=True`` 的中性降级结果，确保该股进入
+        汇总统计，并在报告中以明确文案标注失败原因，而不是凭空消失。
+
+        注意：``success=True`` 是为了让 pipeline 的汇总收集逻辑（只看 ``result.success``）
+        把它纳入报告与邮件清单；语义上的「失败」由 ``analysis_summary`` / ``error_message``
+        中的「LLM 不可用」文案表达，避免被误读为正常分析。
+        """
+        unavailable_text = _localized_text(
+            report_language,
+            en=(
+                "LLM unavailable: all configured models returned no response "
+                "(rate limit / timeout / empty). Degraded analysis — retry later or review manually."
+            ),
+            zh=(
+                "⚠️ LLM 不可用：所有模型均无响应（限流 / 超时 / 空响应）。"
+                "该股票已纳入报告，但未生成有效分析，请稍后重试或手动分析。"
+            ),
+            ko=(
+                "LLM 사용 불가: 모든 모델이 응답하지 않았습니다(rate limit/timeout/empty). "
+                "이 종목은 보고서에 포함되나 분석이 생략되었습니다."
+            ),
+        )
+        return AnalysisResult(
+            code=code,
+            name=name,
+            sentiment_score=50,
+            trend_prediction=localize_trend_prediction('震荡', report_language),
+            operation_advice=localize_operation_advice('持有', report_language),
+            confidence_level=localize_confidence_level('低', report_language),
+            analysis_summary=unavailable_text,
+            risk_warning=unavailable_text,
+            success=True,
+            error_message=f"LLM_UNAVAILABLE: {reason[:200]}",
+            model_used=None,
+            report_language=report_language,
+        )
+
     def _format_prompt(
         self, 
         context: Dict[str, Any], 
@@ -3739,6 +4086,12 @@ class GeminiAnalyzer:
 
 ---
 """
+        portfolio_section = self._portfolio_context_section(code)
+        if portfolio_section:
+            prompt += portfolio_section
+        prev_section = self._previous_signal_section(code)
+        if prev_section:
+            prompt += prev_section
         prompt += format_market_phase_prompt_section(
             context.get("market_phase_context"),
             report_language=report_language,
@@ -3793,6 +4146,13 @@ class GeminiAnalyzer:
 """
 
         # 添加财报与分红（价值投资口径）
+        # A-Stock Data 补充数据（龙虎榜/融资融券/大宗交易/股东户数/资金流/概念板块）
+        astock_data = context.get("astock_supplementary") if isinstance(context, dict) else None
+        if isinstance(astock_data, dict) and astock_data:
+            astock_section = self._build_astock_supplementary_section(astock_data, report_language)
+            if astock_section:
+                prompt += astock_section
+
         fundamental_context = context.get("fundamental_context") if isinstance(context, dict) else None
         earnings_block = (
             fundamental_context.get("earnings", {})
@@ -4111,11 +4471,12 @@ class GeminiAnalyzer:
             prompt += f"""
 
 ### 重点关注（必须明确回答）：
-1. ❓ 是否满足 MA5>MA10>MA20 多头排列？
-2. ❓ 当前乖离率是否在安全范围内（<5%）？—— 超过5%必须标注"严禁追高"
+1. ❓ 当前趋势方向（上升/震荡/下降）与量价结构是否支持当前结论？
+2. ❓ 当前入场位置与风险回报比是否合理？
 3. ❓ 量能是否配合（缩量回调/放量突破）？
 4. ❓ 筹码结构是否健康？
 5. ❓ 消息面有无重大利空？（减持、处罚、业绩变脸等）
+注意：不要以均线规则（如"站上/跌破MA5/MA10/MA20"）作为买卖纪律依据，均线数据仅作参考信息。结论以基本面、资金面、趋势结构为准。
 """
         else:
             prompt += f"""
@@ -4173,7 +4534,131 @@ class GeminiAnalyzer:
 """
         
         return prompt
-    
+
+    def _build_astock_supplementary_section(self, astock_data: Dict[str, Any], report_language: str = "zh") -> str:
+        """将 A-Stock Data 补充数据（龙虎榜/融资融券/大宗/股东/资金流/概念）渲染为提示词段落。"""
+        if not isinstance(astock_data, dict):
+            return ""
+        parts = []
+
+        dragon = astock_data.get("dragon_tiger")
+        if isinstance(dragon, dict):
+            records = dragon.get("records") or []
+            inst = dragon.get("institution") or {}
+            lines = []
+            if records:
+                recent = records[0]
+                lines.append(
+                    f"- 最近上榜：{recent.get('date', 'N/A')}｜原因：{recent.get('reason', 'N/A')}｜"
+                    f"净买入：{recent.get('net_buy', 'N/A')} 万｜换手：{recent.get('turnover', 'N/A')}%"
+                )
+                if len(records) > 1:
+                    lines.append(f"- 近 {len(records)} 次上榜（近30日）")
+            if inst:
+                lines.append(
+                    f"- 机构席位：买方 {inst.get('buy_amt', 'N/A')} 万｜卖方 {inst.get('sell_amt', 'N/A')} 万｜"
+                    f"净额 {inst.get('net_amt', 'N/A')} 万"
+                )
+            seats = dragon.get("seats") or {}
+            for side in ("buy", "sell"):
+                seat_list = seats.get(side) or []
+                if seat_list:
+                    names = "、".join(
+                        f"{s.get('name', '?')}(净{s.get('net', 'N/A')})" for s in seat_list[:3]
+                    )
+                    lines.append(f"- 龙虎榜{'买' if side == 'buy' else '卖'}方席位：{names}")
+            if lines:
+                parts.append("### 🐯 龙虎榜\n" + "\n".join(lines))
+
+        margin = astock_data.get("margin_trading")
+        if isinstance(margin, list) and margin:
+            latest = margin[0]
+            parts.append(
+                "### 💰 融资融券（最新）\n"
+                f"- 日期：{latest.get('date', 'N/A')}｜融资余额：{latest.get('rzye', 'N/A')}｜"
+                f"融资买入：{latest.get('rzmre', 'N/A')}｜融资偿还：{latest.get('rzche', 'N/A')}｜"
+                f"融券余额：{latest.get('rqye', 'N/A')}｜融券卖出：{latest.get('rqmcl', 'N/A')}"
+            )
+
+        block = astock_data.get("block_trade")
+        if isinstance(block, list) and block:
+            rows = []
+            for b in block[:3]:
+                rows.append(
+                    f"- {b.get('date', 'N/A')}｜成交价 {b.get('price', 'N/A')}｜"
+                    f"溢价 {b.get('premium_pct', 'N/A')}%｜金额 {b.get('amount', 'N/A')}｜"
+                    f"买方：{b.get('buyer', 'N/A')}｜卖方：{b.get('seller', 'N/A')}"
+                )
+            parts.append("### 📜 大宗交易（近3笔）\n" + "\n".join(rows))
+
+        holder = astock_data.get("holder_change")
+        if isinstance(holder, list) and holder:
+            h = holder[0]
+            parts.append(
+                "### 👥 股东户数（最新）\n"
+                f"- 截止 {h.get('date', 'N/A')}｜户数 {h.get('holder_num', 'N/A')}｜"
+                f"变化 {h.get('change_num', 'N/A')}（{h.get('change_ratio', 'N/A')}%）｜"
+                f"户均持股 {h.get('avg_shares', 'N/A')}"
+            )
+
+        hithink = astock_data.get("hithink_valuation")
+        if isinstance(hithink, dict) and hithink.get("pe_ttm") is not None:
+            def _f(key):
+                v = hithink.get(key)
+                return f"{v:.2f}" if isinstance(v, (int, float)) else "N/A"
+            parts.append(
+                "### 🏷️ 估值快照（同花顺）\n"
+                f"- PE(TTM)：{_f('pe_ttm')}｜PE(MRQ)：{_f('pe_mrq')}｜PB：{_f('pb_mrq')}｜"
+                f"PS(TTM)：{_f('ps_ttm')}｜PCF(TTM)：{_f('pcf_ttm')}\n"
+                "- 判断高估/低估时请结合行业中位数与自身历史分位；若上述值明显偏离可比同行，请在结论中说明"
+            )
+
+        sent = astock_data.get("market_sentiment")
+        if isinstance(sent, dict) and (sent.get("limit_up") or sent.get("hot_list")):
+            lines = []
+            lu, lb, ld = sent.get("limit_up") or 0, sent.get("limit_break") or 0, sent.get("limit_down") or 0
+            br = sent.get("break_rate")
+            lines.append(
+                f"- 今日涨停 {lu} 家｜炸板 {lb} 家｜跌停 {ld} 家"
+                + (f"｜炸板率 {int(br*100)}%（{'情绪偏弱, 追高需谨慎' if br and br >= 0.3 else '情绪尚可'}）" if br is not None else "")
+            )
+            if sent.get("ladder_top"):
+                lines.append(f"- 连板天梯最高：{sent['ladder_top']}")
+            hot = sent.get("hot_list") or []
+            if hot:
+                names = "、".join(f"{h['name']}" for h in hot[:5])
+                lines.append(f"- 全市场热榜 TOP5：{names}")
+            parts.append("### 🔥 市场情绪（同花顺）\n" + "\n".join(lines))
+
+        flow = astock_data.get("fund_flow")
+        if isinstance(flow, list) and flow:
+            recent_flow = flow[-1]
+            parts.append(
+                "### 🌊 主力资金流（最近交易日）\n"
+                f"- 日期：{recent_flow.get('date', 'N/A')}｜主力净：{recent_flow.get('main_net', 'N/A')}｜"
+                f"超大单净：{recent_flow.get('super_net', 'N/A')}｜大单净：{recent_flow.get('large_net', 'N/A')}｜"
+                f"中单净：{recent_flow.get('mid_net', 'N/A')}｜小单净：{recent_flow.get('small_net', 'N/A')}"
+            )
+            if len(flow) >= 5:
+                recent5 = flow[-5:]
+                avg_main = sum((f.get('main_net') or 0) for f in recent5) / len(recent5)
+                parts.append(f"- 近5日主力净流向均值：{round(avg_main, 1)}")
+
+        concept = astock_data.get("concept_blocks")
+        if isinstance(concept, dict):
+            tags = concept.get("concept_tags") or []
+            if tags:
+                parts.append("### 🏷️ 所属概念板块\n- " + "、".join(str(t) for t in tags[:15]))
+
+        if not parts:
+            return ""
+        header = (
+            "## 🇨🇳 A股特色补充数据\n\n"
+            if report_language != "en"
+            else "## 🇨🇳 A-Share Supplementary Data\n\n"
+        )
+        return header + "\n\n".join(parts) + "\n"
+
     def _format_volume(self, volume: Optional[float]) -> str:
         """格式化成交量显示"""
         if volume is None:
@@ -4373,29 +4858,73 @@ class GeminiAnalyzer:
             flags=re.DOTALL,
         )
         fenced_matches = list(fence_pattern.finditer(text))
-        if len(fenced_matches) > 1:
-            raise ValueError("ambiguous_json")
         if len(fenced_matches) == 1:
             match = fenced_matches[0]
-            outside = (text[:match.start()] + text[match.end():]).strip()
-            if outside:
-                raise ValueError("ambiguous_json")
             fence_lang = (match.group("lang") or "").strip().lower()
             if fence_lang not in {"", "json"}:
-                raise ValueError("ambiguous_json")
-            json_str = match.group("body").strip()
-            data = self._load_analysis_json_candidate(json_str)
-            return json_str, data
+                # 语言标签非 json（如 markdown/text），body 未必是裸 JSON。
+                # 不在此处判死，继续走后续 raw_decode / json_repair 兜底，
+                # 避免把「markdown 包裹的合法 JSON」误判为 ambiguous_json。
+                pass
+            else:
+                json_str = match.group("body").strip()
+                data = self._load_analysis_json_candidate(json_str)
+                return json_str, data
+        if len(fenced_matches) > 1:
+            # Multiple fenced blocks: LLM appended extra commentary/repeat after
+            # the JSON. Pick the first fenced block that parses as a valid JSON
+            # object instead of discarding the whole response.
+            for match in fenced_matches:
+                fence_lang = (match.group("lang") or "").strip().lower()
+                if fence_lang not in {"", "json"}:
+                    continue
+                json_str = match.group("body").strip()
+                try:
+                    data = self._load_analysis_json_candidate(json_str)
+                except Exception:
+                    continue
+                if isinstance(data, dict) and data:
+                    return json_str, data
+            # 多个 fenced block 均无法解析为合法 JSON 时，不在此处判死，
+            # 继续走下方的 json_repair 兜底，尽量从原始响应中修复出 JSON。
+            pass
         if "```" in text:
-            raise ValueError("ambiguous_json")
+            # 存在未闭合/不规则代码围栏时不要直接判死，后续 raw_decode 与
+            # json_repair 仍可能从文本中修复出 JSON 对象。
+            pass
 
+        # Try direct parse
         try:
             data = self._load_analysis_json_candidate(stripped)
-        except json.JSONDecodeError as exc:
-            if self._contains_embedded_json_object(text):
-                raise ValueError("ambiguous_json") from exc
-            raise
-        return stripped, data
+            return stripped, data
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Try to extract JSON from text with preamble/postamble
+        try:
+            decoder = json.JSONDecoder()
+            for index, char in enumerate(stripped):
+                if char != "{":
+                    continue
+                try:
+                    _obj, end = decoder.raw_decode(stripped[index:])
+                    json_str = stripped[index:index + end]
+                    data = self._load_analysis_json_candidate(json_str)
+                    return json_str, data
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        except Exception:
+            pass
+
+        # Last resort: use json_repair on the full raw response
+        try:
+            repaired = repair_json(stripped, return_objects=True)
+            if isinstance(repaired, dict):
+                return stripped, repaired
+        except Exception:
+            pass
+
+        raise ValueError("no_valid_json_found")
 
     def _load_analysis_json_candidate(self, json_str: str) -> Dict[str, Any]:
         """Parse one already-selected JSON candidate, repairing common LLM JSON drift."""

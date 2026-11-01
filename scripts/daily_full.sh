@@ -14,7 +14,7 @@ source .venv/bin/activate
 set -a; source .env 2>/dev/null; set +a
 
 # 自选股: 优先 watchlist.json, fallback 到 .env STOCK_LIST
-STOCKS=""   # 预初始化 (set -u 下未定义即崩, 恢复期 watchlist.json 缺失时曾致每晚静默失败)
+STOCKS=""
 if [ -f data/watchlist.json ]; then
   STOCKS=$(python3 -c "import json; print(','.join(json.load(open('data/watchlist.json'))))" 2>/dev/null)
 fi
@@ -36,10 +36,10 @@ fi
 echo "[$(date +%T)] watchlist=$STOCKS" >> "$LOG"
 
 # 第一轮: 大盘复盘
-timeout 4500 python main.py --market-review >> "$LOG" 2>&1
+timeout 4500 python main.py --market-review --force-run --max-runtime 4440 >> "$LOG" 2>&1
 echo "[$(date +%T)] market-review exit $?" >> "$LOG"
 # 第二轮: 自选股分析
-timeout 3300 python main.py --stocks "$STOCKS" --no-market-review >> "$LOG" 2>&1
+timeout 3300 python main.py --stocks "$STOCKS" --no-market-review --force-run --max-runtime 3240 >> "$LOG" 2>&1
 echo "[$(date +%T)] full exit $?" >> "$LOG"
 # 第三轮: AlphaSift 选股
 timeout 3300 python scripts/alphasift_screen_and_analyze.py >> "$LOG" 2>&1

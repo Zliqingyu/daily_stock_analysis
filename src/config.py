@@ -821,6 +821,9 @@ class Config:
     serpapi_keys: List[str] = field(default_factory=list)  # SerpAPI Keys
     searxng_base_urls: List[str] = field(default_factory=list)  # SearXNG instance URLs (self-hosted, no quota)
     searxng_public_instances_enabled: bool = True  # Auto-discover public SearXNG instances when base URLs are absent
+    tavily_enabled: bool = True  # Tavily 搜索开关（设 TAVILY_ENABLED=false 关闭）
+    anspire_search_enabled: bool = True  # Anspire 搜索开关（独立；默认随 ANSPIRE_LLM_ENABLED，可由 ANSPIRE_SEARCH_ENABLED 覆盖）
+    brave_enabled: bool = True  # Brave 搜索开关（设 BRAVE_ENABLED=false 关闭，对齐 Tavily/Anspire；默认有 key 即启用）
 
     # === Social Sentiment (US stocks only, api.adanos.org) ===
     social_sentiment_api_key: Optional[str] = None
@@ -1061,7 +1064,7 @@ class Config:
     # 基本面阶段总预算（秒）
     fundamental_stage_timeout_seconds: float = FUNDAMENTAL_STAGE_TIMEOUT_SECONDS_DEFAULT
     # 单能力源调用超时（秒）
-    fundamental_fetch_timeout_seconds: float = 8.0
+    fundamental_fetch_timeout_seconds: float = 3.0
     # 单能力失败重试次数（已包含首次）
     fundamental_retry_max: int = 1
     # 基本面上下文短 TTL（秒）
@@ -1548,6 +1551,15 @@ class Config:
             os.getenv('SEARXNG_PUBLIC_INSTANCES_ENABLED'),
             default=True,
         )
+        tavily_enabled = parse_env_bool(os.getenv('TAVILY_ENABLED'), default=True)
+        brave_enabled = parse_env_bool(os.getenv('BRAVE_ENABLED'), default=True)
+        # Anspire 搜索开关独立于 Anspire LLM 通道：
+        # 显式设置 ANSPIRE_SEARCH_ENABLED 时以它为准；否则回退到 ANSPIRE_LLM_ENABLED（向后兼容旧配置）；两者皆未设置时默认开启。
+        _anspire_search_raw = os.getenv('ANSPIRE_SEARCH_ENABLED')
+        if _anspire_search_raw is not None and _anspire_search_raw.strip():
+            anspire_search_enabled = parse_env_bool(_anspire_search_raw, default=True)
+        else:
+            anspire_search_enabled = parse_env_bool(os.getenv('ANSPIRE_LLM_ENABLED'), default=True)
 
         # 企微消息类型与最大字节数逻辑
         wechat_msg_type = os.getenv('WECHAT_MSG_TYPE', 'markdown')
@@ -1706,6 +1718,9 @@ class Config:
             serpapi_keys=serpapi_keys,
             searxng_base_urls=searxng_base_urls,
             searxng_public_instances_enabled=searxng_public_instances_enabled,
+            tavily_enabled=tavily_enabled,
+            anspire_search_enabled=anspire_search_enabled,
+            brave_enabled=brave_enabled,
             social_sentiment_api_key=os.getenv('SOCIAL_SENTIMENT_API_KEY') or None,
             social_sentiment_api_url=os.getenv('SOCIAL_SENTIMENT_API_URL', 'https://api.adanos.org').rstrip('/'),
             news_max_age_days=parse_env_int(os.getenv('NEWS_MAX_AGE_DAYS'), 3, field_name='NEWS_MAX_AGE_DAYS', minimum=1),
@@ -2036,7 +2051,7 @@ class Config:
             ),
             fundamental_fetch_timeout_seconds=parse_env_float(
                 os.getenv('FUNDAMENTAL_FETCH_TIMEOUT_SECONDS'),
-                8.0,
+                3.0,
                 field_name='FUNDAMENTAL_FETCH_TIMEOUT_SECONDS',
                 minimum=0.0,
             ),

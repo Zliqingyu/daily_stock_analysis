@@ -198,6 +198,10 @@ class BaseSearchProvider(ABC):
                 if self._key_errors.get(key, 0) < 3:
                     return key
             
+            # FIX(20260928): 432=配额耗尽是持久状态, 重置计数只会无限重试卡死流程
+            if all(self._key_errors.get(k, 0) >= 3 for k in self._api_keys) and getattr(self, "_quota_exhausted", False):
+                logger.warning(f"[{self._name}] 配额耗尽熔断中, 跳过搜索")
+                return None
             # 所有 key 都有问题，重置错误计数并返回第一个
             logger.warning(f"[{self._name}] 所有 API Key 都有错误记录，重置错误计数")
             self._key_errors = {key: 0 for key in self._api_keys}
@@ -319,6 +323,9 @@ class TavilySearchProvider(BaseSearchProvider):
                 error_message="tavily-python 未安装，请运行: pip install tavily-python"
             )
         
+        if getattr(self, "_quota_exhausted", False):
+            return SearchResponse(query=query, results=[], provider=self.name,
+                                  success=False, error_message="Tavily 配额耗尽熔断中")
         try:
             client = TavilyClient(api_key=api_key)
             
@@ -362,9 +369,12 @@ class TavilySearchProvider(BaseSearchProvider):
             
         except Exception as e:
             error_msg = str(e)
-            # 检查是否是配额问题
-            if 'rate limit' in error_msg.lower() or 'quota' in error_msg.lower():
-                error_msg = f"API 配额已用尽: {error_msg}"
+            # FIX(20260928): 432/配额耗尽 = 持久状态, 本进程内永久熔断 (重试只会卡死流水线)
+            if ('432' in error_msg or 'rate limit' in error_msg.lower()
+                    or 'quota' in error_msg.lower() or 'usage limit' in error_msg.lower()):
+                self._quota_exhausted = True
+                error_msg = f"API 配额已用尽(熔断至重启): {error_msg}"
+                logger.error(f"[{self._name}] {error_msg}")
             
             return SearchResponse(
                 query=query,
@@ -2095,6 +2105,137 @@ class SearXNGSearchProvider(BaseSearchProvider):
         )
 
 
+class AkshareNewsProvider(BaseSearchProvider):
+    """东财个股新闻 (经 akshare, 免费无 key) — 个股新闻保底通道。
+
+    从 query 中提取 6 位股票代码调用 ak.stock_news_em；
+    query 里没有代码时返回失败，由链路继续尝试下一通道。
+    """
+
+    def __init__(self):
+        super().__init__(["local"], "Akshare")
+
+    @property
+    def is_available(self) -> bool:
+        return True
+
+    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+        """未使用: 本通道无 key, 逻辑在 search() 里"""
+        return SearchResponse(query=query, results=[], provider=self.name, success=False,
+                              error_message="not implemented")
+
+    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+        import re
+        from datetime import datetime, timedelta
+        start_time = time.time()
+        m = re.search(r"(?<!\d)(6\d{5}|0\d{5}|3\d{5}|[48]\d{5})(?!\d)", query)
+        if not m:
+            return SearchResponse(query=query, results=[], provider=self.name,
+                                  success=False, error_message="query 中无 A 股代码，跳过 akshare 个股新闻")
+        code = m.group(1)
+        try:
+            import akshare as ak
+            df = ak.stock_news_em(symbol=code)
+        except Exception as exc:
+            return SearchResponse(query=query, results=[], provider=self.name,
+                                  success=False, error_message=f"akshare stock_news_em 失败: {exc}",
+                                  search_time=time.time() - start_time)
+        cutoff = datetime.now() - timedelta(days=days)
+        results: List[SearchResult] = []
+        stale: List[SearchResult] = []
+        for _, row in df.iterrows():
+            try:
+                pub = datetime.strptime(str(row.get("发布时间", ""))[:19], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pub = None
+            item = SearchResult(
+                title=str(row.get("新闻标题", ""))[:120],
+                snippet=str(row.get("新闻内容", ""))[:300],
+                url=str(row.get("新闻链接", "")),
+                source=str(row.get("文章来源", "")) or "东财个股新闻",
+                published_date=str(row.get("发布时间", ""))[:10] or None,
+            )
+            if pub is None or pub >= cutoff:
+                results.append(item)      # 窗口内
+            else:
+                stale.append(item)        # 窗口外(保底用)
+        # 保底通道语义: 窗口内优先; 窗口内为空时退回最新几条(过期总比没有强)
+        if not results:
+            results, stale = stale, []
+            if results:
+                logger.info("[Akshare] 窗口内无新闻, 回退返回最新 %s 条(超出 %s 天窗口)",
+                            len(results), days)
+        results.sort(key=lambda r: r.published_date or "", reverse=True)
+        return SearchResponse(query=query, results=results[:max_results], provider=self.name,
+                              success=bool(results),
+                              error_message=None if results else "akshare 无任何新闻",
+                              search_time=time.time() - start_time)
+
+
+class Sina7x24Provider(BaseSearchProvider):
+    """新浪财经 7x24 快讯 (免费无 key) — 宏观/市场级新闻保底通道。
+
+    拉取滚动快讯流，按 query 中的关键词过滤；命中太少时返回最新的
+    一部分，保证宏观面始终有上下文可用。
+    """
+
+    _FEED_URL = ("https://zhibo.sina.com.cn/api/zhibo/feed"
+                 "?page=1&page_size=50&zhibo_id=152&tag_id=0")
+
+    def __init__(self):
+        super().__init__(["local"], "Sina7x24")
+
+    @property
+    def is_available(self) -> bool:
+        return True
+
+    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+        """未使用: 本通道无 key, 逻辑在 search() 里"""
+        return SearchResponse(query=query, results=[], provider=self.name, success=False,
+                              error_message="not implemented")
+
+    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+        import re
+        from datetime import datetime, timedelta
+        start_time = time.time()
+        try:
+            resp = requests.get(self._FEED_URL, headers={"User-Agent": "Mozilla/5.0"},
+                                timeout=10)
+            resp.raise_for_status()
+            feed = resp.json()["result"]["data"]["feed"]["list"]
+        except Exception as exc:
+            return SearchResponse(query=query, results=[], provider=self.name,
+                                  success=False, error_message=f"新浪7x24 拉取失败: {exc}",
+                                  search_time=time.time() - start_time)
+        # 关键词: query 里的中文词(>=2字)和数字代码
+        tokens = [t for t in re.findall(r"[\u4e00-\u9fa5]{2,}|\d{6}", query)]
+        cutoff = datetime.now() - timedelta(days=days)
+        hits, recent = [], []
+        for item in feed:
+            text = str(item.get("rich_text", ""))
+            ts = str(item.get("create_time", ""))
+            try:
+                pub = datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pub = None
+            if pub is not None and pub < cutoff:
+                continue
+            entry = SearchResult(title=text[:50], snippet=text[:300],
+                                 url="https://finance.sina.com.cn/7x24",
+                                 source="新浪7x24",
+                                 published_date=ts[:10] or None)
+            if tokens and any(t in text for t in tokens):
+                hits.append(entry)
+            recent.append(entry)
+        # 命中关键词优先; 不足 max_results 时补最新快讯保证宏观上下文
+        merged = hits + [e for e in recent if e not in hits]
+        results = merged[:max_results]
+        return SearchResponse(query=query, results=results, provider=self.name,
+                              success=bool(results),
+                              error_message=None if results else "新浪7x24 无窗口期内快讯",
+                              search_time=time.time() - start_time)
+
+
 class SearchService:
     """
     搜索服务
@@ -2339,6 +2480,12 @@ class SearchService:
             else:
                 logger.info("已启用 SearXNG 公共实例自动发现模式")
 
+        # 6.5 免费保底通道（无 key、无额度）: 个股新闻 + 宏观快讯
+        #     排在所有付费通道之后, 仅当它们全部失败/超限时才被调用
+        self._providers.append(AkshareNewsProvider())
+        self._providers.append(Sina7x24Provider())
+        logger.info("已配置免费保底搜索: Akshare个股新闻 + Sina7x24快讯")
+
         # 7. Anspire Search（实时智能搜索优化）
         if anspire_keys:
             self._providers.insert(0, AnspireSearchProvider(anspire_keys))
@@ -2475,8 +2622,10 @@ class SearchService:
             return {"search_lang": "en", "country": "US"}
         return {}
 
-    # A-share ETF code prefixes (Shanghai 51/52/56/58, Shenzhen 15/16/18)
-    _A_ETF_PREFIXES = ('51', '52', '56', '58', '15', '16', '18')
+    # A-share ETF/LOF fund code prefixes
+    # Shanghai ETF: 51/52/56/58/588/589, Shanghai LOF: 501/502/506
+    # Shenzhen ETF/LOF: 15/16
+    _A_ETF_PREFIXES = ('51', '52', '56', '58', '15', '16', '501', '502', '506', '588', '589')
     _ETF_NAME_KEYWORDS = ('ETF', 'FUND', 'TRUST', 'INDEX', 'TRACKER', 'UNIT')  # US/HK ETF name hints
 
     @staticmethod

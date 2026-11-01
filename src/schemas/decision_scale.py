@@ -23,11 +23,11 @@ class DecisionScaleBand:
 
 
 CANONICAL_DECISION_SCALE: tuple[DecisionScaleBand, ...] = (
-    DecisionScaleBand(80, 100, "strong_buy", "buy", "buy", "强烈买入", "高胜率机会，可执行买入/加仓计划"),
-    DecisionScaleBand(60, 79, "buy", "buy", "buy", "买入", "偏积极机会，允许少量待确认项"),
-    DecisionScaleBand(40, 59, "watch", "watch", "hold", "观望", "信号分歧或确认不足，等待触发条件"),
-    DecisionScaleBand(20, 39, "reduce", "reduce", "sell", "减仓", "风险明显抬升，优先降低暴露"),
-    DecisionScaleBand(0, 19, "sell", "sell", "sell", "卖出", "趋势或风险显著恶化，优先退出"),
+    DecisionScaleBand(80, 100, "strong_buy", "buy", "buy", "强烈买入", "高胜率机会，可执行建仓/加仓计划"),
+    DecisionScaleBand(60, 79, "buy", "buy", "buy", "买入", "偏积极机会，可新建仓位或少量加仓"),
+    DecisionScaleBand(40, 59, "watch", "watch", "hold", "观望", "信号分歧或确认不足，空仓者继续等待入场信号，持仓者维持现有仓位"),
+    DecisionScaleBand(20, 39, "reduce", "reduce", "sell", "减仓/离场", "风险明显抬升，持仓者优先降低暴露或离场，空仓者不参与"),
+    DecisionScaleBand(0, 19, "sell", "sell", "sell", "卖出/回避", "趋势或风险显著恶化，持仓者立即退出，空仓者坚决回避"),
 )
 
 
@@ -37,10 +37,12 @@ CANONICAL_DECISION_SCALE_PROMPT_ZH = """## Canonical 评分与动作口径
 - 80-100：强烈买入，`action=buy`，`decision_type=buy`。
 - 60-79：买入，`action=buy`，`decision_type=buy`。
 - 40-59：观望，`action=watch`，`decision_type=hold`。
-- 20-39：减仓，`action=reduce`，`decision_type=sell`。
-- 0-19：卖出，`action=sell`，`decision_type=sell`。
+- 20-39：减仓/离场，`action=reduce`，`decision_type=sell`。
+- 0-19：卖出/回避，`action=sell`，`decision_type=sell`。
 - `decision_type` 只保留 `buy|hold|sell` 兼容统计；更细建议必须写入 `action`。
-- 若 score >= 60 但最终 `action` 是 `hold/watch`，或 score < 40 但最终 `action` 是 `hold/watch`，必须在 `guardrail_reason` 或 `dashboard.decision_stability.reason` 中说明降级原因。"""
+- 若 score >= 60 但最终 `action` 是 `hold/watch`，或 score < 40 但最终 `action` 是 `hold/watch`，必须在 `guardrail_reason` 或 `dashboard.decision_stability.reason` 中说明降级原因。
+- 操作建议必须同时为空仓者和持仓者给出可执行指引。空仓者的核心问题是"现在是否该建仓、在什么价位建仓"；持仓者的核心问题是"是否加仓、持有还是减仓"。
+- 当用户默认持仓状态为空仓时（见持仓状态提示），`operation_advice` 的措辞应侧重入场判断（建仓/等待/回避），而非预设已持仓（加仓/持有/减仓）。"""
 
 
 def normalize_score(value: Any) -> Optional[int]:

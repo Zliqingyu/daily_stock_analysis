@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from src.analyzer import AnalysisResult
 from src.config import get_config
 from src.market_phase_summary import format_public_market_status_line, format_public_phase_pack_excerpt
+from src.services.decision_signal_summary import format_decision_signal_excerpt
 from src.report_language import (
     get_localized_stock_name,
     get_report_labels,
@@ -67,6 +68,27 @@ def _clean_sniper_value(val: Any) -> str:
         if s.startswith(prefix):
             return s[len(prefix):]
     return s
+
+
+def _coerce_probability(val: Any) -> Optional[int]:
+    """将到达/止损概率规范为 0-100 整数；非法/越界返回 None。"""
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        n = int(val)
+    else:
+        s = str(val).strip().rstrip("%").strip()
+        if not s:
+            return None
+        try:
+            n = int(round(float(s)))
+        except (ValueError, TypeError):
+            return None
+    if 0 <= n <= 100:
+        return n
+    return None
 
 
 def _resolve_templates_dir() -> Path:
@@ -189,6 +211,12 @@ def render(
             report_language=report_language,
         )
 
+    def decision_signal_excerpt(result: AnalysisResult) -> str:
+        return format_decision_signal_excerpt(
+            getattr(result, "decision_signal_summary", None),
+            report_language=report_language,
+        )
+
     def market_status_line() -> str:
         for source_results in (results or [], sorted_results):
             for result in source_results:
@@ -216,8 +244,10 @@ def render(
         "market_status_line": market_status_line(),
         "escape_md": _escape_md,
         "clean_sniper": _clean_sniper_value,
+        "coerce_probability": _coerce_probability,
         "failed_checks": failed_checks,
         "phase_pack_excerpt": phase_pack_excerpt,
+        "decision_signal_excerpt": decision_signal_excerpt,
         "history_by_code": {},
         "get_chip_unavailable_reason": get_chip_unavailable_reason,
         "is_chip_structure_unavailable": is_chip_structure_unavailable,

@@ -668,9 +668,40 @@ class StockAnalysisPipeline:
                 report_language=report_language,
             )
             if portfolio_context is not None:
-                enhanced_context["portfolio_context"] = dict(portfolio_context)
+                enhanced_context["portfolio_context"] = self._portfolio_position_for(portfolio_context, code)
             if isinstance(market_structure_context, dict):
                 enhanced_context["market_structure_context"] = market_structure_context
+
+            # Step 6.5: A-Stock Data 补充数据（龙虎榜/融资融券/大宗交易/股东户数/资金流/概念板块）
+            if market == "cn" and not is_bse_code(normalize_stock_code(code)):
+                try:
+                    import threading
+                    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+                    from data_provider.astock_data_provider import AstockDataProvider
+                    _trade_date = daily_market_target_date.isoformat() if daily_market_target_date else None
+                    _provider = AstockDataProvider()
+                    _cancel_event = threading.Event()
+
+                    _executor = ThreadPoolExecutor(max_workers=1)
+                    try:
+                        _future = _executor.submit(
+                            _provider.get_supplementary_data, code,
+                            trade_date=_trade_date, cancel_event=_cancel_event,
+                        )
+                        try:
+                            _supplementary = _future.result(timeout=30)
+                        except (FuturesTimeout, Exception):
+                            _cancel_event.set()
+                            _supplementary = {}
+                    finally:
+                        _executor.shutdown(wait=False, cancel_futures=True)
+
+                    _non_empty = {k: v for k, v in _supplementary.items() if v}
+                    if _non_empty:
+                        enhanced_context["astock_supplementary"] = _non_empty
+                        logger.info("%s(%s) A-Stock Data 补充数据: %s", stock_name, code, list(_non_empty.keys()))
+                except Exception as e:
+                    logger.debug("A-Stock Data 补充数据获取失败 %s: %s", code, e)
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             (
@@ -1314,7 +1345,7 @@ class StockAnalysisPipeline:
                 "fundamental_context": fundamental_context,
             }
             if isinstance(portfolio_context, dict):
-                initial_context["portfolio_context"] = dict(portfolio_context)
+                initial_context["portfolio_context"] = self._portfolio_position_for(portfolio_context, code)
             if self.analysis_skills is not None:
                 initial_context["skills"] = self.analysis_skills
             if market_phase_context is not None:
@@ -1780,6 +1811,25 @@ class StockAnalysisPipeline:
         target_context["daily_market_context"] = safe_context
         target_context["daily_market_context_summary"] = prompt_section
 
+    def _portfolio_position_for(self, portfolio_context: Any, code: str) -> Dict[str, Any]:
+        """从全局持仓上下文中提取当前标的的持仓信息，并附上空仓/持仓分析视角指令。"""
+        data = portfolio_context if isinstance(portfolio_context, dict) else {}
+        positions = data.get("positions") if isinstance(data.get("positions"), dict) else {}
+        digits = "".join(ch for ch in str(code) if ch.isdigit())
+        pos = positions.get(digits) or positions.get(str(code))
+        if pos:
+            out = dict(pos)
+            out["held"] = True
+            out["instruction"] = (
+                "用户当前已持有该标的（见持仓数据）。请基于持仓成本、止损位与当前市价，"
+                "从 持有/加仓/减仓/清仓 的角度给出建议，不要给出空仓视角的首次买入建议。"
+            )
+            return out
+        return {
+            "held": False,
+            "instruction": "用户未持有该标的，可按新建仓视角评估买入价值。",
+        }
+
     def _agent_result_to_analysis_result(
         self,
         agent_result,
@@ -1792,6 +1842,12 @@ class StockAnalysisPipeline:
         """
         将 AgentResult 转换为 AnalysisResult。
         """
+        # LLM 彻底失败时不再伪造"50分/观望"假结果，直接返回 None 让上游按失败处理
+        if not getattr(agent_result, "success", False):
+            logger.warning(
+                f"[{code}] Agent 分析未成功(success=False)，跳过假结果生成，按分析失败处理"
+            )
+            return None
         report_language = normalize_report_language(getattr(self.config, "report_language", "zh"))
         dash = None
         result = AnalysisResult(
@@ -2941,6 +2997,7 @@ class StockAnalysisPipeline:
         send_notification: bool = True,
         merge_notification: bool = False,
         current_time: Optional[datetime] = None,
+        max_runtime: float = 0,
     ) -> List[AnalysisResult]:
         """
         运行完整的分析流程
@@ -3023,10 +3080,25 @@ class StockAnalysisPipeline:
         
         # 使用线程池并发处理
         # 注意：max_workers 设置较低（默认3）以避免触发反爬
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # 提交任务
-            future_to_code = {
-                executor.submit(
+        # 运行时长上限：到点后停止提交新股票，且不再等待进行中的任务（超时兜底发送）
+        deadline_ts = (start_time + max_runtime) if max_runtime else None
+        self.deadline_reached = False
+
+        executor = ThreadPoolExecutor(max_workers=self.max_workers)
+        try:
+            # 提交任务（到点后停止提交新股票）
+            future_to_code = {}
+            submitted_count = 0
+            for code in stock_codes:
+                if deadline_ts is not None and time.time() >= deadline_ts:
+                    logger.info(
+                        "⏰ 到达运行时长上限（%.0fs），停止提交新股票；"
+                        "已提交 %d/%d 只",
+                        max_runtime, submitted_count, len(stock_codes),
+                    )
+                    self.deadline_reached = True
+                    break
+                future = executor.submit(
                     self.process_single_stock,
                     code,
                     skip_analysis=dry_run,
@@ -3034,11 +3106,11 @@ class StockAnalysisPipeline:
                     report_type=report_type,  # Issue #119: 传递报告类型
                     analysis_query_id=uuid.uuid4().hex,
                     current_time=resume_reference_time,
-                ): code
-                for code in stock_codes
-            }
-            
-            # 收集结果
+                )
+                future_to_code[future] = code
+                submitted_count += 1
+
+            # 收集结果（到点后不再等待剩余未完成任务）
             for idx, future in enumerate(as_completed(future_to_code)):
                 code = future_to_code[future]
                 try:
@@ -3068,6 +3140,18 @@ class StockAnalysisPipeline:
 
                 except Exception as e:
                     logger.error(f"[{code}] 任务执行失败: {e}")
+
+                # 到点后停止等待进行中的任务（进行中未完的不计入“已跑过的”）
+                if deadline_ts is not None and time.time() >= deadline_ts:
+                    logger.info(
+                        "⏰ 到达运行时长上限，停止等待剩余未完成任务"
+                        "（进行中未计入已完成）"
+                    )
+                    self.deadline_reached = True
+                    break
+        finally:
+            # 不阻塞等待进行中的任务，避免超过 job 超时导致发送被砍
+            executor.shutdown(wait=False, cancel_futures=True)
         
         # 统计
         elapsed_time = time.time() - start_time

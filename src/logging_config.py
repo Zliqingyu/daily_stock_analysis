@@ -147,15 +147,18 @@ def setup_logging(
     root_logger.addHandler(file_handler)
 
     # Handler 3: 调试日志文件（DEBUG 级别，包含所有详细信息）
-    debug_handler = RotatingFileHandler(
-        debug_log_file,
-        maxBytes=50 * 1024 * 1024,  # 50MB
-        backupCount=3,
-        encoding='utf-8'
-    )
-    debug_handler.setLevel(logging.DEBUG)
-    debug_handler.setFormatter(rel_formatter)
-    root_logger.addHandler(debug_handler)
+    # 默认关闭: 全量分析一晚能写几十MB DEBUG, 白吃内存/IO
+    # 需要 时设环境变量 DSA_DEBUG_FILE=1
+    if os.getenv("DSA_DEBUG_FILE", "") == "1" or debug:
+        debug_handler = RotatingFileHandler(
+            debug_log_file,
+            maxBytes=50 * 1024 * 1024,  # 50MB
+            backupCount=3,
+            encoding='utf-8'
+        )
+        debug_handler.setLevel(logging.DEBUG)
+        debug_handler.setFormatter(rel_formatter)
+        root_logger.addHandler(debug_handler)
 
     # 降低第三方库的日志级别
     quiet_loggers = DEFAULT_QUIET_LOGGERS.copy()

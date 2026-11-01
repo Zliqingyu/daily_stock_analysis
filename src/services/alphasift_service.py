@@ -1091,12 +1091,46 @@ class AlphaSiftService:
         _ensure_alphasift_enabled(self.config)
         _ensure_alphasift_available_for_use()
         _ensure_supported_market(market)
-        _ensure_supported_strategy(strategy)
+        # 支持逗号分隔多策略：每晚同时扫 抄底/超跌/进攻 多套逻辑，合并去重后取 top N
+        strategy_names = [s.strip() for s in strategy.split(",") if s.strip()] or [strategy]
+        for s in strategy_names:
+            _ensure_supported_strategy(s)
 
         adapter = _get_dsa_adapter()
         screen = _get_adapter_callable(adapter, "screen", "screen() 不可调用。")
         try:
-            raw = _call_alphasift_screen(screen, strategy, market, max_results, self.config)
+            merged_candidates: list = []
+            seen_codes: set = set()
+            base_raw: Dict[str, Any] | None = None
+            for s in strategy_names:
+                raw = _call_alphasift_screen(screen, s, market, max_results, self.config)
+                raw_data_i = _to_plain(raw)
+                if not isinstance(raw_data_i, dict):
+                    raw_data_i = {"candidates": raw_data_i}
+                raw_data_i = _remove_non_finite_json_values(raw_data_i)
+                if base_raw is None:
+                    base_raw = raw_data_i
+                for cand in _normalize_candidates(raw_data_i):
+                    code_key = str(cand.get("code") or "")
+                    if code_key and code_key in seen_codes:
+                        continue
+                    if code_key:
+                        seen_codes.add(code_key)
+                    merged_candidates.append(cand)
+
+            def _score_of(c: Dict[str, Any]) -> float:
+                try:
+                    return float(c.get("score") or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            merged_candidates.sort(key=_score_of, reverse=True)
+            if base_raw is None:
+                base_raw = {}
+            raw_data = dict(base_raw)
+            raw_data["candidates"] = merged_candidates
+            raw_data["strategy"] = strategy
+            raw_data["candidate_count"] = len(merged_candidates)
         except ValueError as exc:
             raise HTTPException(
                 status_code=400,
@@ -1121,6 +1155,7 @@ class AlphaSiftService:
         raw_data = _remove_non_finite_json_values(raw_data)
 
         candidates = _normalize_candidates(raw_data)
+        candidates = _filter_untradeable_boards(candidates)
         selected = candidates[:max_results]
         selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
         return {
@@ -3557,6 +3592,49 @@ def _ensure_supported_market(market: str) -> None:
                 ),
             },
         )
+
+
+def _filter_untradeable_boards(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """剔除用户无交易权限的板块候选：创业板/科创板/北交所。
+
+    通过 ALPHASIFT_ALLOW_BOARDS 环境变量可放行（逗号分隔：chinext,star,bj）。
+    """
+    import os as _os
+    allow = {
+        b.strip().lower()
+        for b in _os.getenv("ALPHASIFT_ALLOW_BOARDS", "").split(",")
+        if b.strip()
+    }
+    if not candidates:
+        return candidates
+
+    def _board(code: str):
+        digits = "".join(ch for ch in code if ch.isdigit())[:6]
+        if len(digits) < 6:
+            return None
+        if digits.startswith(("300", "301")):
+            return "chinext"
+        if digits.startswith(("688", "689")):
+            return "star"
+        if digits.startswith(("4", "8")):
+            return "bj"
+        return None
+
+    kept = []
+    dropped = []
+    for cand in candidates:
+        code = str(cand.get("code") or "")
+        board = _board(code)
+        if board and board not in allow:
+            dropped.append(f"{code}({board})")
+            continue
+        kept.append(cand)
+    if dropped:
+        import logging
+        logging.getLogger(__name__).info(
+            "AlphaSift 剔除无权限板块候选 %d 只: %s", len(dropped), ", ".join(dropped[:10])
+        )
+    return kept
 
 
 def _normalize_candidates(raw: Any) -> List[Dict[str, Any]]:

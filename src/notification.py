@@ -17,6 +17,7 @@ A股自选股智能分析系统 - 通知层
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -26,6 +27,7 @@ from enum import Enum
 from src.config import Config, get_config
 from src.enums import ReportType
 from src.market_phase_summary import format_public_market_status_line, format_public_phase_pack_excerpt
+from src.services.decision_signal_summary import format_decision_signal_excerpt
 from src.notification_routing import (
     get_notification_route_config,
     split_notification_route_channels,
@@ -360,6 +362,12 @@ class NotificationService(
             getattr(result, "market_phase_summary", None),
             getattr(result, "analysis_context_pack_overview", None),
             source=getattr(result, "analysis_visibility_source", None) or "evaluator_snapshot",
+            report_language=report_language,
+        )
+
+    def _decision_signal_excerpt(self, result: AnalysisResult, report_language: str) -> str:
+        return format_decision_signal_excerpt(
+            getattr(result, "decision_signal_summary", None),
             report_language=report_language,
         )
 
@@ -875,6 +883,9 @@ class NotificationService(
                     f"**Confidence：{confidence_stars}**",
                     "",
                 ])
+                signal_excerpt = self._decision_signal_excerpt(result, report_language)
+                if signal_excerpt:
+                    report_lines.extend([signal_excerpt, ""])
                 self._append_market_snapshot(report_lines, result)
 
                 # 核心看点
@@ -999,7 +1010,7 @@ class NotificationService(
             f"*{labels['generated_at_label']}：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
         ])
 
-        return "\n".join(report_lines)
+        return self._prepend_trade_plan("\n".join(report_lines))
 
     @staticmethod
     def _escape_md(name: str) -> str:
@@ -1024,6 +1035,27 @@ class NotificationService(
             if value.startswith(prefix):
                 return value[len(prefix):]
         return value
+
+    @staticmethod
+    def _coerce_probability(value: Any) -> Optional[int]:
+        """将到达/止损概率统一规范为 0-100 的整数。
+
+        模型可能返回 70 / "70" / "70%" / "70 %" 等形态；非法、越界或非数值返回 None。
+        这样即使模型未严格返回整数，渲染层也能稳定显示概率而非静默丢弃。
+        """
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            num = int(round(float(value)))
+        else:
+            text = str(value).strip().rstrip("%").strip()
+            try:
+                num = int(round(float(text)))
+            except (ValueError, TypeError):
+                return None
+        if 0 <= num <= 100:
+            return num
+        return None
 
     @staticmethod
     def _phase_decision_list(value: Any) -> List[str]:
@@ -1144,6 +1176,323 @@ class NotificationService(
             signal_tag,
         )
 
+    _TRADE_PLAN_RE = __import__("re").compile(
+        r"([^\n|:：]{2,40}?)\((\d{6})\)\s*\*{0,2}\s*[:：]?\s*\*{0,2}\s*(买入|持有|观望|回避|减仓)"
+        r"\s*\|\s*评分\s*(\d+)\s*\|[^|]*\|[^|]*?清仓止损位[：:]?\s*([\d.]+)元"
+    )
+
+    @staticmethod
+    def _ma_check(code: str):
+        """均线体检: 拉日线算 MA5/10/20/60, 判定 R2-R4 状态。失败返回 None。"""
+        try:
+            import sys as _sys
+            from pathlib import Path as _P
+            root = str(_P(__file__).resolve().parent.parent)
+            if root not in _sys.path:
+                _sys.path.insert(0, root)
+            from data_provider.tencent_fetcher import TencentFetcher
+            import datetime as _dt
+            f = TencentFetcher()
+            sym = code if code.startswith(("sh", "sz")) else (f"sh{code}" if code[0] in "56" else f"sz{code}")
+            df = f._fetch_range(sym, (_dt.date.today() - _dt.timedelta(days=200)).isoformat(),
+                                _dt.date.today().isoformat(), stock_code=sym)
+            c = [float(x) for x in df["close"]]
+            if len(c) < 65:
+                return None
+            ma = lambda w: sum(c[-w:]) / w
+            px = c[-1]
+            d = dict(px=px, ma5=ma(5), ma10=ma(10), ma20=ma(20), ma60=ma(60))
+            if px > d["ma5"]:
+                d["status"] = "ok"
+            elif px > d["ma10"]:
+                d["status"] = "break5"
+            elif px > d["ma60"]:
+                d["status"] = "break10"
+            else:
+                d["status"] = "below60"
+            return d
+        except Exception:
+            return None
+
+    def _prepend_trade_plan(self, content: str) -> str:
+        """在报告顶部追加『明日挂单清单（复制给券商AI）』区块。
+
+        数据源: 组合数据库 (portfolio_positions + portfolio_accounts)。
+        任何解析失败都静默降级为原报告，不影响主流程。
+        挂单清单只在晚盘报告生成; 晨报设 DSA_SKIP_TRADE_PLAN=1 跳过。
+        """
+        if os.getenv("DSA_SKIP_TRADE_PLAN", "") == "1":
+            return content
+        try:
+            import re as _re
+            from src.storage import PortfolioPosition, PortfolioAccount, get_db
+
+            db = get_db()
+            session = db.get_session()
+            try:
+                rows = (
+                    session.query(PortfolioPosition)
+                    .join(PortfolioAccount, PortfolioAccount.id == PortfolioPosition.account_id)
+                    .filter(PortfolioAccount.is_active == True)  # noqa: E712
+                    .all()
+                )
+                # 读现金余额（取第一个活跃账户）
+                acct = session.query(PortfolioAccount).filter(
+                    PortfolioAccount.is_active == True  # noqa: E712
+                ).first()
+                cash = 0.0
+                if acct:
+                    try:
+                        from src.services.portfolio_service import PortfolioService
+                        svc = PortfolioService()
+                        snap = svc.get_portfolio_snapshot(
+                            account_id=acct.id, include_realtime=False)
+                        cash = snap.get("total_cash", 0.0)
+                    except Exception:
+                        pass
+            finally:
+                session.close()
+
+            held = {}
+            for r in rows:
+                code = "".join(c for c in r.symbol if c.isdigit())
+                if not code or (r.quantity or 0) <= 0:
+                    continue
+                held[code] = (r.symbol, int(r.quantity), 0)  # stop_loss 从数据库无法获取
+
+            # 从报告的决策仪表盘摘要里反向提取: 名称 + 止损位
+            # 行格式: 🟡 **中国广核(003816)**: 持有 | 评分 59 | 看多 | ... 止损 清仓止损位：4.05元（...）
+            name_map: dict = {}
+            stop_map: dict = {}
+            tp_map: dict = {}
+            for m in self._TRADE_PLAN_RE.finditer(content):
+                name, code = m.group(1), m.group(2)
+                name_map[code] = name
+                try:
+                    stop_map[code] = float(m.group(5))
+                except (TypeError, ValueError):
+                    pass
+                # 提取止盈位 (RR 计算): 「全部止盈位：X元」
+                if name:
+                    m_tp = _re.search(
+                        _re.escape(name) + r"\(" + code + r"\)[\s\S]{0,250}?止盈位[：:]?\s*([\d.]+)元",
+                        content)
+                    if m_tp:
+                        try:
+                            tp_map[code] = float(m_tp.group(1))
+                        except ValueError:
+                            pass
+
+            # 止损冷却: 近5个交易日内止损清仓的股票禁止买回 (AI Wave 防报复交易)
+            cooldown: set = set()
+            try:
+                import datetime as _dt
+                from src.storage import PortfolioTrade
+                cutoff = _dt.date.today() - _dt.timedelta(days=7)
+                sold_rows = (
+                    session.query(PortfolioTrade.symbol, PortfolioTrade.trade_date)
+                    .filter(PortfolioTrade.side == "sell")
+                    .filter(PortfolioTrade.trade_date >= cutoff)
+                    .all())
+                pos_syms = {r.symbol for r in rows if (r.quantity or 0) > 0}
+                for r in sold_rows:
+                    c = "".join(ch for ch in (r.symbol or "") if ch.isdigit())
+                    if c and c not in pos_syms:
+                        cooldown.add(c)
+            except Exception:
+                pass
+
+            mv = sum((r.market_value_base or 0) for r in rows if (r.quantity or 0) > 0)
+            equity = cash + mv
+            cap = equity * 0.30
+            risk_budget = equity * 0.02
+
+            sell_lines = []
+            r4_codes: set = set()
+            for code, (name, qty, stop) in held.items():
+                disp = name_map.get(code) or name
+                stop = stop_map.get(code, 0)
+                # FIX (2026-09-22): 低分持仓没有独立摘要行 (被合并进"低分观察"),
+                # stop/reduce 提取全落空 → 输出"需自行设定止损位"。
+                # fallback: 从该股「AI 决策信号」段落提取 止损位/减仓位。
+                _section = ""
+                if disp:
+                    # 取所有出现位置中最长的段落 (低分持仓在"低分观察"行也有一次短出现)
+                    _best = ""
+                    for m_sec in _re.finditer(
+                            _re.escape(disp) + r"\s*\(" + code + r"\)[\s\S]{0,4000}?(?=\n## |\Z)", content):
+                        if len(m_sec.group(0)) > len(_best):
+                            _best = m_sec.group(0)
+                    _section = _best
+                if stop <= 0 and _section:
+                    m_st = _re.search(r"止损位[：:]?\s*([\d.]+)\s*元", _section)
+                    if m_st:
+                        try:
+                            stop = float(m_st.group(1))
+                        except ValueError:
+                            pass
+                # 均线体检 (9条规则 R2-R4): 2026-09-17 起停用 (用户要求,
+                # 报告纯LLM口径; ma_check 函数保留以便日后恢复)
+                ma_info = None
+                if False:
+                    try:
+                        ma_info = self._ma_check(code)
+                    except Exception:
+                        ma_info = None
+                if ma_info and ma_info.get("status") == "break10":
+                    r4_codes.add(code)
+                    sell_lines.append(
+                        f"- {disp}：均线清仓单(R4)——收盘 {ma_info['px']:.2f} 已破 MA10 {ma_info['ma10']:.2f}，"
+                        f"明日开盘集合竞价 卖出全部 {qty} 股（有效期1个交易日）")
+                    continue
+                if ma_info and ma_info.get("status") == "break5":
+                    half = max(int(qty // 2 // 100) * 100, 100)
+                    trig = round(ma_info["ma10"] * 0.998, 2)
+                    sell_lines.append(
+                        f"- {disp}：均线减仓单(R3)——收盘 {ma_info['px']:.2f} 破 MA5 {ma_info['ma5']:.2f}，"
+                        f"条件卖单 触发 {trig} 元，卖出 {half} 股（半仓）；"
+                        f"若明日收盘收回 MA5 {ma_info['ma5']:.2f} 上方则撤单保留")
+                    continue
+                # 提取减仓价位: 摘要行「减仓价位：X元」 或 决策信号段自然语言
+                # FIX (2026-09-22): LLM 常写"反弹5.60附近减半仓"而非字面"减仓价位：X元"
+                reduce_px = 0.0
+                if disp:
+                    m_red = _re.search(
+                        _re.escape(disp) + r"\(" + code + r"\)[\s\S]{0,200}?减仓价位[：:]?\s*([\d.]+)元",
+                        content)
+                    if m_red:
+                        try:
+                            reduce_px = float(m_red.group(1))
+                        except ValueError:
+                            pass
+                if reduce_px <= 0 and _section:
+                    m_r1 = _re.search(r"(?:反弹|回升)[^\d]{0,6}([\d.]+)\s*元?[^。\n]{0,10}(?:减半仓|减仓)", _section)
+                    m_r2 = _re.search(r"([\d.]+)\s*元?[^。\n]{0,8}减半仓", _section)
+                    for _m in (m_r1, m_r2):
+                        if _m:
+                            try:
+                                reduce_px = float(_m.group(1))
+                                break
+                            except ValueError:
+                                pass
+                if reduce_px > 0 and stop > 0 and reduce_px > stop and qty >= 200:
+                    half = max(int(qty // 2 // 100) * 100, 100)
+                    limit_sell = round(stop * 0.98, 2)
+                    sell_lines.append(
+                        f"- {disp}：减仓单——触发价 {reduce_px} 元，委托价 {reduce_px:.2f} 元，卖出 {half} 股（半仓）；"
+                        f"保护：跌破 {stop} 元触发，委托价 {limit_sell} 元卖出全部"
+                        f"（有效期1个交易日）")
+                elif stop > 0:
+                    limit_sell = round(stop * 0.98, 2)
+                    sell_lines.append(
+                        f"- {disp}：条件卖单——触发价 {stop} 元，委托价 {limit_sell} 元，卖出 {qty} 股"
+                        f"（有效期1个交易日）")
+                else:
+                    # 均线正常但无 LLM 止损位 → 用 MA10 作保护位 (R4 提前防守)
+                    if ma_info:
+                        prot = round(ma_info["ma10"] * 0.98, 2)
+                        sell_lines.append(
+                            f"- {disp}：条件卖单——触发价 {ma_info['ma10']:.2f} 元（MA10，跌破即清仓），"
+                            f"委托价 {prot} 元，卖出 {qty} 股（有效期1个交易日，每日按新MA10更新）")
+                    else:
+                        sell_lines.append(
+                            f"- {disp}：持仓 {qty} 股，需自行设定止损位")
+
+            buy_lines = []
+            for m in self._TRADE_PLAN_RE.finditer(content):
+                name, code, action, score, stop = (
+                    m.group(1), m.group(2), m.group(3), int(m.group(4)),
+                    float(m.group(5)))
+                if action != "买入" or score < 65 or stop <= 0:
+                    continue
+                if code in cooldown:
+                    continue  # 止损冷却期内禁止买回
+                # FIX(20260916): 均线 R4 破位的票禁止买入/加仓 (清仓与加仓互斥)
+                if r4_codes and code in r4_codes:
+                    continue
+                entry = 0.0
+                for lbl in ("理想建仓位", "回落买入位"):
+                    m_entry = _re.search(
+                        _re.escape(name) + r"\(" + code + r"\)[\s\S]{0,200}?" + lbl + r"[：:]?\s*([\d.]+(?:-[\d.]+)?)元",
+                        content)
+                    if m_entry:
+                        # FIX(20260916): 支持 "1.79-1.80元" 区间格式, 取下限 (稳健)
+                        entry = float(m_entry.group(1).split("-")[0])
+                        break
+                if entry <= 0:
+                    entry = stop / 0.95
+                if entry <= stop:
+                    continue
+                # AI Wave RR 硬过滤: (止盈-买入)/(买入-止损) >= 1.3, 否则赔率不足不出单
+                tp = tp_map.get(code, 0)
+                if tp > entry > stop and (tp - entry) / (entry - stop) < 1.3:
+                    continue
+                size = min(cap, risk_budget * entry / (entry - stop))
+                qty = int(size / entry / 100) * 100
+                if qty <= 0:
+                    continue
+                disp = name_map.get(code) or name
+                guard = round(stop * 0.98, 2)
+                if code in held:
+                    # 已持仓 + 买入信号 = 加仓单
+                    hold_qty = held[code][1]
+                    buy_lines.append(
+                        f"- {disp}：加仓 {qty} 股（现有 {hold_qty} 股），限价 {entry:.2f} 元以内"
+                        f"（有效期1个交易日，未成交作废）；"
+                        f"保护：跌破 {stop} 元触发，委托价 {guard} 元卖出全部")
+                else:
+                    buy_lines.append(
+                        f"- {disp}：买入 {qty} 股，限价 {entry:.2f} 元以内"
+                        f"（有效期1个交易日，未成交作废）；"
+                        f"条件卖：跌破 {stop} 元触发，委托价 {guard} 元卖出 {qty} 股")
+
+            # 持有股回落买入单: 有回落买入位的持仓股, 小仓位(风险预算一半)补低
+            dip_lines = []
+            for code, (name, qty, _ignored) in held.items():
+                stop = stop_map.get(code, 0)
+                disp = name_map.get(code) or name
+                if not disp:
+                    continue
+                m_dip = _re.search(
+                    _re.escape(disp) + r"\(" + code + r"\)[\s\S]{0,200}?回落买入位[：:]?\s*([\d.]+)元",
+                    content)
+                if not m_dip or stop <= 0 or code in cooldown:
+                    continue
+                if r4_codes and code in r4_codes:
+                    continue  # R4 清仓票不补低
+                try:
+                    dip = float(m_dip.group(1).split("-")[0])
+                except ValueError:
+                    print(f"[DBG] {code} float fail")
+                    continue
+                # 间距过滤: 买入位距止损不足3% → 支撑不可靠(一天内可能买完即破), 不出单
+                # RR 过滤: 距离3%但止盈空间赔率不足1.3 同样放弃 (AI Wave 风险收益比纪律)
+                tp_d = tp_map.get(code, 0)
+                rr_ok = not (tp_d > dip > stop) or (tp_d - dip) / (dip - stop) >= 1.3
+                if dip >= stop and (dip - stop) / dip >= 0.03 and rr_ok:
+                    size = min(cap * 0.5, risk_budget * 0.5 * dip / (dip - stop))
+                    add_qty = int(size / dip / 100) * 100
+                    if add_qty > 0:
+                        dip_lines.append(
+                            f"- {disp}：回落至 {dip:.2f} 元，限价买入 {add_qty} 股"
+                            f"（有效期1个交易日，未成交作废）；跌破 {stop} 元，全部卖出")
+
+            if not sell_lines and not buy_lines and not dip_lines:
+                return content
+            block = [
+                "# 📋 挂单清单", "",
+                "**卖出保护单**", *sell_lines, ""]
+            if dip_lines:
+                block += ["**回落买入单（已持仓股补低）**", *dip_lines, ""]
+            if buy_lines:
+                block += ["**买入计划**", *buy_lines, ""]
+            elif not dip_lines:
+                block += ["**买入计划**：今日无达标新买入信号", ""]
+            block += ["---", ""]
+            return "\n".join(block) + content
+        except Exception:
+            return content
+
     def generate_dashboard_report(
         self,
         results: List[AnalysisResult],
@@ -1215,15 +1564,38 @@ class NotificationService(
                 f"## 📊 {labels['summary_heading']}",
                 "",
             ])
-            for r in sorted_results:
+            # 非持仓且低分(<50)的候选: 收进一句话, 不占摘要版面
+            low_watch = [r for r in sorted_results
+                         if r.sentiment_score < 50
+                         and not (getattr(r, "held", False))]
+            shown = [r for r in sorted_results if r not in low_watch]
+            for r in shown:
                 signal_text, signal_emoji, _ = self._get_signal_level(r)
                 display_name = self._get_display_name(r, report_language)
+                dash = r.dashboard or {}
+                battle = dash.get('battle_plan', {}) or {}
+                sniper = battle.get('sniper_points', {}) or {}
+                prices = []
+                if sniper.get('ideal_buy') and str(sniper['ideal_buy']) not in ('', 'N/A', '-'):
+                    prices.append(f"买入 {sniper['ideal_buy']}")
+                if sniper.get('take_profit') and str(sniper['take_profit']) not in ('', 'N/A', '-'):
+                    prices.append(f"止盈 {sniper['take_profit']}")
+                if sniper.get('stop_loss') and str(sniper['stop_loss']) not in ('', 'N/A', '-'):
+                    prices.append(f"止损 {sniper['stop_loss']}")
+                price_str = f" | {' '.join(prices)}" if prices else ""
                 report_lines.append(
                     f"{signal_emoji} **{display_name}({r.code})**: "
                     f"{signal_text} | "
                     f"{labels['score_label']} {r.sentiment_score} | "
                     f"{localize_trend_prediction(r.trend_prediction, report_language)}"
+                    f"{price_str}"
                 )
+            if low_watch:
+                names = "、".join(
+                    f"{self._get_display_name(r, report_language)}({r.code}) {r.sentiment_score}分"
+                    for r in low_watch)
+                report_lines.append(
+                    f"⚪ 低分观察（暂无操作价值）: {names}")
             report_lines.extend([
                 "",
                 "---",
@@ -1243,6 +1615,10 @@ class NotificationService(
                     f"## {signal_emoji} {stock_name} ({result.code})",
                     "",
                 ])
+                signal_excerpt = self._decision_signal_excerpt(result, report_language)
+                if signal_excerpt:
+                    report_lines.extend([signal_excerpt, ""])
+
                 # ========== 舆情与基本面概览（放在最前面）==========
                 intel = dashboard.get('intelligence', {}) if dashboard else {}
                 if intel:
@@ -1386,26 +1762,137 @@ class NotificationService(
                     # 狙击点位
                     sniper = battle.get('sniper_points', {})
                     if sniper:
+                        buy_prob = self._coerce_probability(sniper.get('buy_reach_probability'))
+                        target_prob = self._coerce_probability(sniper.get('target_reach_probability'))
+                        stop_prob = self._coerce_probability(sniper.get('stop_reach_probability'))
                         report_lines.extend([
                             f"**📍 {labels['action_points_heading']}**",
                             "",
-                            f"| {labels['action_points_heading']} | {labels['current_price_label']} |",
-                            "|---------|------|",
-                            f"| 🎯 {labels['ideal_buy_label']} | {self._clean_sniper_value(sniper.get('ideal_buy', 'N/A'))} |",
-                            f"| 🔵 {labels['secondary_buy_label']} | {self._clean_sniper_value(sniper.get('secondary_buy', 'N/A'))} |",
-                            f"| 🛑 {labels['stop_loss_label']} | {self._clean_sniper_value(sniper.get('stop_loss', 'N/A'))} |",
-                            f"| 🎊 {labels['take_profit_label']} | {self._clean_sniper_value(sniper.get('take_profit', 'N/A'))} |",
+                            f"| {labels['action_points_heading']} | {labels['current_price_label']} | 概率 | 时间 |",
+                            "|---------|------|------|------|",
+                            f"| 🎯 {labels['ideal_buy_label']} | {self._clean_sniper_value(sniper.get('ideal_buy', 'N/A'))} | {f'{buy_prob}%' if buy_prob is not None else 'N/A'} | {sniper.get('buy_time_horizon', '-')} |",
+                            f"| 🔵 {labels['secondary_buy_label']} | {self._clean_sniper_value(sniper.get('secondary_buy', 'N/A'))} | - | - |",
+                            f"| 🛑 {labels['stop_loss_label']} | {self._clean_sniper_value(sniper.get('stop_loss', 'N/A'))} | {f'{stop_prob}%' if stop_prob is not None else 'N/A'} | {sniper.get('stop_time_horizon', '-')} |",
+                            f"| 🎊 {labels['take_profit_label']} | {self._clean_sniper_value(sniper.get('take_profit', 'N/A'))} | {f'{target_prob}%' if target_prob is not None else '-'} | - |",
                             "",
                         ])
+                        # 显示精确价格
+                        ideal_price = sniper.get('ideal_buy_price')
+                        stop_price = sniper.get('stop_loss_price')
+                        target_price = sniper.get('take_profit_price')
+                        if ideal_price or stop_price or target_price:
+                            report_lines.extend([
+                                f"**💰 精确点位**",
+                                "",
+                            ])
+                            if ideal_price:
+                                report_lines.append(f"- 买入价: {ideal_price} 元")
+                            if stop_price:
+                                report_lines.append(f"- 止损价: {stop_price} 元")
+                            if target_price:
+                                report_lines.append(f"- 止盈卖出价: {target_price} 元")
+                            # 禁止追高线（买入价 +3%）
+                            if ideal_price and isinstance(ideal_price, (int, float)):
+                                no_chase = round(ideal_price * 1.03, 2)
+                                report_lines.append(f"- ⛔ 禁止追高线: {no_chase} 元（+3%），超过此价盈亏比倒挂，请勿追")
+                            report_lines.append("")
                     # 仓位策略
                     position = battle.get('position_strategy', {})
                     if position:
                         report_lines.extend([
                             f"**💰 {labels['suggested_position_label']}**: {position.get('suggested_position', 'N/A')}",
-                            f"- {labels['entry_plan_label']}: {position.get('entry_plan', 'N/A')}",
                             f"- {labels['risk_control_label']}: {position.get('risk_control', 'N/A')}",
                             "",
                         ])
+                        # 显示精确仓位
+                        pos_pct = position.get('position_percentage')
+                        max_pos = position.get('max_position')
+                        risk_reward = position.get('risk_reward_ratio')
+                        if pos_pct or max_pos or risk_reward:
+                            report_lines.extend([
+                                f"**📊 仓位明细**",
+                                "",
+                            ])
+                            if pos_pct:
+                                report_lines.append(f"- 建议总仓位: {pos_pct}%")
+                            if max_pos:
+                                report_lines.append(f"- 最大总仓位: {max_pos}%")
+                            if risk_reward:
+                                report_lines.append(f"- 风险回报比: 1:{risk_reward}")
+                            # 持仓时间
+                            holding_period = position.get('expected_holding_period')
+                            if holding_period:
+                                report_lines.append(f"- 预期持仓时间: {holding_period}")
+                            report_lines.append("")
+
+                        # 分批建仓表格
+                        entry_batches = position.get('entry_batches', [])
+                        if entry_batches and isinstance(entry_batches, list):
+                            report_lines.extend([
+                                f"**📥 分批建仓计划**",
+                                "",
+                                f"| 批次 | 操作 | 仓位占比 | 价格 | 触发条件 |",
+                                f"|------|------|----------|------|----------|",
+                            ])
+                            for batch in entry_batches:
+                                if isinstance(batch, dict):
+                                    report_lines.append(
+                                        f"| {batch.get('batch', '?')} "
+                                        f"| {batch.get('action', '-')} "
+                                        f"| {batch.get('ratio', '-')}% "
+                                        f"| {batch.get('price', '-')} "
+                                        f"| {batch.get('trigger', '-')} |"
+                                    )
+                            report_lines.append("")
+                        elif position.get('entry_plan'):
+                            report_lines.append(f"- **建仓策略**: {position.get('entry_plan')}")
+                            report_lines.append("")
+
+                        # 分批止盈表格
+                        exit_batches = position.get('exit_batches', [])
+                        if exit_batches and isinstance(exit_batches, list):
+                            report_lines.extend([
+                                f"**💰 分批止盈计划**",
+                                "",
+                                f"| 批次 | 操作 | 卖出占比 | 价格 | 触发条件 |",
+                                f"|------|------|----------|------|----------|",
+                            ])
+                            for batch in exit_batches:
+                                if isinstance(batch, dict):
+                                    report_lines.append(
+                                        f"| {batch.get('batch', '?')} "
+                                        f"| {batch.get('action', '-')} "
+                                        f"| {batch.get('ratio', '-')}% "
+                                        f"| {batch.get('price', '-')} "
+                                        f"| {batch.get('trigger', '-')} |"
+                                    )
+                            report_lines.append("")
+                        elif position.get('exit_plan'):
+                            report_lines.append(f"- **止盈策略**: {position.get('exit_plan')}")
+                            report_lines.append("")
+
+                        # 分批止损表格
+                        stop_batches = position.get('stop_loss_batches', [])
+                        if stop_batches and isinstance(stop_batches, list):
+                            report_lines.extend([
+                                f"**🛑 分批止损计划**",
+                                "",
+                                f"| 批次 | 操作 | 减仓占比 | 价格 | 触发条件 |",
+                                f"|------|------|----------|------|----------|",
+                            ])
+                            for batch in stop_batches:
+                                if isinstance(batch, dict):
+                                    report_lines.append(
+                                        f"| {batch.get('batch', '?')} "
+                                        f"| {batch.get('action', '-')} "
+                                        f"| {batch.get('ratio', '-')}% "
+                                        f"| {batch.get('price', '-')} "
+                                        f"| {batch.get('trigger', '-')} |"
+                                    )
+                            report_lines.append("")
+                        elif position.get('stop_loss_plan'):
+                            report_lines.append(f"- **止损策略**: {position.get('stop_loss_plan')}")
+                            report_lines.append("")
                     # 检查清单
                     checklist = battle.get('action_checklist', []) if battle else []
                     if checklist:
@@ -1495,7 +1982,7 @@ class NotificationService(
         if models:
             report_lines.append(f"*{labels['analysis_model_label']}：{', '.join(models)}*")
 
-        return "\n".join(report_lines)
+        return self._prepend_trade_plan("\n".join(report_lines))
 
     def generate_wechat_dashboard(self, results: List[AnalysisResult]) -> str:
         """
@@ -1572,6 +2059,11 @@ class NotificationService(
                 if one_sentence:
                     lines.append(f"📌 **{one_sentence[:80]}**")
                     lines.append("")
+                signal_excerpt = self._decision_signal_excerpt(result, report_language)
+                if signal_excerpt:
+                    lines.append(signal_excerpt)
+                    lines.append("")
+
                 # 重要信息区（舆情+基本面）
                 info_lines = []
 
@@ -1619,6 +2111,15 @@ class NotificationService(
                         points.append(f"🛑{labels['stop_loss_label']}:{stop_loss[:15]}")
                     if take_profit:
                         points.append(f"🎊{labels['take_profit_label']}:{take_profit[:15]}")
+                    buy_prob = self._coerce_probability(sniper.get('buy_reach_probability'))
+                    target_prob = self._coerce_probability(sniper.get('target_reach_probability'))
+                    stop_prob = self._coerce_probability(sniper.get('stop_reach_probability'))
+                    if buy_prob is not None:
+                        points.append(f"📈买入概率:{buy_prob}%")
+                    if target_prob is not None:
+                        points.append(f"🎯目标概率:{target_prob}%")
+                    if stop_prob is not None:
+                        points.append(f"📉止损概率:{stop_prob}%")
                     if points:
                         lines.append(" | ".join(points))
                         lines.append("")
@@ -1727,6 +2228,7 @@ class NotificationService(
         ])
 
         content = "\n".join(lines)
+        content = self._prepend_trade_plan(content)
 
         return content
 
@@ -1778,10 +2280,22 @@ class NotificationService(
             dash = r.dashboard or {}
             core = dash.get('core_conclusion', {}) or {}
             one = (core.get('one_sentence') or r.analysis_summary or '')[:60]
+            # 狙击点位
+            battle = dash.get('battle_plan', {}) or {}
+            sniper = battle.get('sniper_points', {}) or {}
+            prices = []
+            if sniper.get('ideal_buy') and str(sniper['ideal_buy']) not in ('', 'N/A', '-'):
+                prices.append(f"买入 {sniper['ideal_buy']}")
+            if sniper.get('take_profit') and str(sniper['take_profit']) not in ('', 'N/A', '-'):
+                prices.append(f"止盈 {sniper['take_profit']}")
+            if sniper.get('stop_loss') and str(sniper['stop_loss']) not in ('', 'N/A', '-'):
+                prices.append(f"止损 {sniper['stop_loss']}")
+            price_str = f" {' '.join(prices)} |" if prices else ""
             lines.append(
                 f"**{name}({r.code})** {emoji} "
-                f"{signal_text} | "
-                f"{labels['score_label']} {r.sentiment_score} | {one}"
+                f"{signal_text} |"
+                f"{price_str}"
+                f" {labels['score_label']} {r.sentiment_score} | {one}"
             )
         lines.append("")
         lines.append(f"*{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
@@ -1824,6 +2338,10 @@ class NotificationService(
         excerpt = self._public_phase_pack_excerpt(result, report_language)
         if excerpt:
             lines.extend([excerpt, ""])
+
+        signal_excerpt = self._decision_signal_excerpt(result, report_language)
+        if signal_excerpt:
+            lines.extend([signal_excerpt, ""])
 
         self._append_market_snapshot(lines, result)
 
@@ -1890,6 +2408,12 @@ class NotificationService(
             stop_loss = sniper.get('stop_loss', '-')
             take_profit = sniper.get('take_profit', '-')
             lines.append(f"| {ideal_buy} | {stop_loss} | {take_profit} |")
+            # 禁止追高线（买入价 +3%）
+            ideal_price = sniper.get('ideal_buy_price')
+            if ideal_price and isinstance(ideal_price, (int, float)):
+                no_chase = round(ideal_price * 1.03, 2)
+                lines.append("")
+                lines.append(f"⛔ **禁止追高线: {no_chase} 元**（+3%），超过此价盈亏比倒挂，请勿追")
             lines.append("")
 
         # ========== 信号归因分析 ==========
@@ -2726,7 +3250,8 @@ class NotificationService(
 
         if filename is None:
             date_str = datetime.now().strftime('%Y%m%d')
-            filename = f"report_{date_str}.md"
+            suffix = (os.environ.get("DSA_REPORT_FILE_SUFFIX") or "").strip()
+            filename = f"report_{suffix}_{date_str}.md" if suffix else f"report_{date_str}.md"
 
         # 确保 reports 目录存在（使用项目根目录下的 reports）
         reports_dir = Path(__file__).parent.parent / 'reports'
