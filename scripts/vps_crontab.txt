@@ -1,0 +1,11 @@
+# dsa VPS 定时任务 (北京时间)
+CRON_TZ=Asia/Shanghai
+
+# 每日分析: 周日~周四 19:00 (产出次日计划, 对齐 GH Actions 习惯)
+0 19 * * 0-4  cd /home/kos/dsa && .venv/bin/python main.py >> logs/daily_$(date +\%Y\%m\%d).log 2>&1
+
+# 早盘 briefing: 周一~周五 08:35 (开盘前)
+35 8 * * 1-5  bash /home/kos/dsa/scripts/morning_briefing.sh
+
+# 盘中监控: 周一~周五, 常驻进程由 systemd 管, 这里只做兜底拉起
+*/5 9-14 * * 1-5  cd /home/kos/dsa && (pgrep -f intraday_monitor > /dev/null || nohup .venv/bin/python scripts/intraday_monitor.py --interval 120 >> logs/intraday_$(date +\%Y\%m\%d).log 2>&1 &)
