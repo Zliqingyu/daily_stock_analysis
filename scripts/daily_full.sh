@@ -36,10 +36,10 @@ fi
 echo "[$(date +%T)] watchlist=$STOCKS" >> "$LOG"
 
 # 第一轮: 大盘复盘
-timeout 4500 python main.py --market-review --max-runtime 4440 >> "$LOG" 2>&1
+timeout 4500 python main.py --market-review >> "$LOG" 2>&1
 echo "[$(date +%T)] market-review exit $?" >> "$LOG"
 # 第二轮: 自选股分析
-timeout 3300 python main.py --stocks "$STOCKS" --no-market-review --max-runtime 3240 >> "$LOG" 2>&1
+timeout 3300 python main.py --stocks "$STOCKS" --no-market-review >> "$LOG" 2>&1
 echo "[$(date +%T)] full exit $?" >> "$LOG"
 # 第三轮: AlphaSift 选股
 timeout 3300 python scripts/alphasift_screen_and_analyze.py >> "$LOG" 2>&1
