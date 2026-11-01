@@ -452,6 +452,11 @@ def _compute_trading_day_filter(
     if not getattr(config, 'trading_day_check_enabled', True):
         return (stock_codes, None, False)
 
+    # --force-run 旁路: 提示语承诺可用 force-run 强制执行, 这里兑现它 (周末预备周一计划场景)
+    if getattr(args, 'force_run', False):
+        logger.info("force-run: 跳过交易日过滤, 全量执行")
+        return (stock_codes, None, False)
+
     from src.core.trading_calendar import (
         get_market_for_stock,
         get_open_markets_today,
