@@ -524,21 +524,55 @@ class Panel:
         symbol = self.pick_stock(side)
         if not symbol:
             return
+
+        # 默认价格: 实时行情 (有则自动填入, 回车即用)
+        qt = self.feeder.quotes.get(symbol) or {}
+        live_px = qt.get("price")
+        px_default = f"{live_px:.3f}" if live_px else ""
+
+        # 查当前持仓 (卖出时回车=全仓)
+        con = sqlite3.connect(DB)
         try:
-            qty = float(self.ask("数量"))
-            px = float(self.ask("价格"))
-            fee = float(self.ask("手续费", "0") or 0)
-            tax = float(self.ask("印花税", "0") or 0)
-        except ValueError:
-            print("✗ 数字无效")
-            return
+            snap = replay(con)
+        finally:
+            con.close()
+        held_qty = snap["positions"].get(symbol, {}).get("qty", 0)
+        cash = snap["cash"]
+
         cn = "买入" if side == "buy" else "卖出"
-        print(f"{B}{cn} {symbol}{R} {qty:,.0f} × {px} = {qty * px:,.2f} CNY")
-        if self.ask_key("确认? (1确认 0取消)", "01") == "1":
-            print(dsa_write_trade(symbol, side, qty, px, fee, tax, confirm=False))
-        else:
-            print("已取消")
-        time.sleep(1.2)
+        print(f"\n{B}{cn} {symbol}{R}  持有:{held_qty:,.0f}  现金:{cash:,.0f}")
+
+        try:
+            # 数量: 回车 = 卖出全仓 / 买入用全部现金÷价格
+            px_s = self.ask("价格", px_default)
+            px = float(px_default if px_s == px_default else (px_s or px_default))
+            if px <= 0:
+                print("✗ 价格无效"); return
+
+            if side == "sell" and held_qty > 0:
+                qty_s = self.ask("数量 (回车=全仓)")
+                qty = held_qty if qty_s == "" else float(qty_s)
+            else:
+                max_qty = int(cash / px) if px > 0 else 0
+                qty_s = self.ask(f"数量 (回车=最大可买 {max_qty:,})")
+                qty = max_qty if qty_s == "" else float(qty_s)
+            if qty <= 0:
+                print("✗ 数量无效"); return
+        except ValueError:
+            print("✗ 数字无效"); return
+
+        # 自动计算费用
+        amount = qty * px
+        fee = round(max(amount * 0.0001, 0.1), 2)      # 佣金: 万1, 最低0.1元
+        tax = round(amount * 0.0005, 2) if side == "sell" else 0  # 印花税: 卖出万5
+
+        total_fee = fee + tax
+        print(f"{B}{cn} {symbol}{R} {qty:,.0f} × {px} = {amount:,.2f}  费:{total_fee:.2f}  净:{amount - total_fee if side == 'buy' else amount - total_fee:,.2f} CNY")
+
+        # 自动确认 (不再二次确认)
+        result = dsa_write_trade(symbol, side, qty, px, fee, tax, confirm=False)
+        print(result)
+        time.sleep(1.5)
 
     def cash_flow(self, direction):
         try:
