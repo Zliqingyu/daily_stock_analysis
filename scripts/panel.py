@@ -35,6 +35,26 @@ DB = os.path.join(HOME, "dsa", "data", "stock_analysis.db")
 DSA_ENV = os.path.join(HOME, "dsa", ".env")
 INDEX_JSON = os.path.join(HOME, "dsa", "data", "cache", "stocks.index.json")
 QUOTE_API = "http://127.0.0.1:9996/api/v1/stocks/{code}/quote"
+TENCENT_API = "https://qt.gtimg.cn/q={prefix}{code}"
+
+def tencent_prefix(code):
+    """代码 → 腾讯前缀: 5/6开头=sh, 其余=sz (覆盖LOF/ETF/股票)"""
+    return "sh" if code[0] in "56" else "sz"
+
+def fetch_tencent_quote(code):
+    """腾讯实时行情 (GBK, ~分隔), LOF/ETF/股票全支持"""
+    url = TENCENT_API.format(prefix=tencent_prefix(code), code=code)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        raw = r.read().decode("gbk", errors="replace")
+    fields = raw.split("~")
+    if len(fields) < 35:
+        return None
+    name = fields[1]
+    price = float(fields[3]) if fields[3] else None
+    prev_close = float(fields[5]) if fields[5] else None
+    pct = round((price - prev_close) / prev_close * 100, 2) if price and prev_close else None
+    return {"name": name, "price": price, "pct": pct}
 ATS_ENGINES = [("DEMO-A", os.path.join(HOME, "ats", ".env"), os.path.join(HOME, "ats", "ats.log")),
                ("DEMO-B", os.path.join(HOME, "ats-b", ".env"), os.path.join(HOME, "ats-b", "ats.log"))]
 NAME_CACHE = os.path.join(HOME, ".panel_names.json")
@@ -281,25 +301,36 @@ class Feeder:
         self.save_names()
 
     def _fetch_quote(self, code):
+        d = None
+        # 腾讯实时行情: 股票/LOF/ETF 全覆盖, 延迟<1秒
         try:
-            with urllib.request.urlopen(QUOTE_API.format(code=code), timeout=12) as r:
-                d = json.load(r)
+            d = fetch_tencent_quote(code)
+        except Exception:
+            pass
+        if d and d.get("price") is not None:
             with self.lock:
-                self.quotes[code] = {"name": d.get("stock_name") or "",
-                                     "price": d.get("current_price"),
-                                     "pct": d.get("change_percent"),
+                self.quotes[code] = {"name": d.get("name") or "",
+                                     "price": d.get("price"),
+                                     "pct": d.get("pct"),
                                      "ts": time.time()}
-            nm = d.get("stock_name")
+            nm = d.get("name")
             if nm and self.names.get(code) != nm:
                 self.names[code] = nm
                 self.save_names()
-        except Exception:
-            pass
 
     def _quote_loop(self):
         ex = ThreadPoolExecutor(max_workers=10)
         while not self.stop.wait(2.0):
-            for code in watch_list():
+            codes = watch_list()
+            # 也拉持仓股的行情 (不在自选里的持仓也要有价格)
+            try:
+                con = sqlite3.connect(DB)
+                snap = replay(con)
+                con.close()
+                codes = list(dict.fromkeys(codes + sorted(snap["positions"].keys())))
+            except Exception:
+                pass
+            for code in codes:
                 if self.stop.is_set():
                     return
                 try:
@@ -432,6 +463,8 @@ class Panel:
         px_of = {}
         for sym in pos_syms:
             px = (q.get(sym) or {}).get("price") or prices.get(sym)
+            if not px:
+                px = snap["positions"].get(sym, {}).get("avg_cost")  # 三级兜底: 成本价
             if px:
                 mv += snap["positions"][sym]["qty"] * px
                 upl += (px - snap["positions"][sym]["avg_cost"]) * snap["positions"][sym]["qty"]
@@ -525,9 +558,15 @@ class Panel:
         if not symbol:
             return
 
-        # 默认价格: 实时行情 (有则自动填入, 回车即用)
+        # 价格来源: 实时行情 > 数据库缓存 > 手动输入
         qt = self.feeder.quotes.get(symbol) or {}
         live_px = qt.get("price")
+        if not live_px:
+            # Feeder 还没拉到, 查缓存
+            con_tmp = sqlite3.connect(DB)
+            cached = cached_prices(con_tmp) or {}
+            con_tmp.close()
+            live_px = cached.get(symbol)
         px_default = f"{live_px:.3f}" if live_px else ""
 
         # 查当前持仓 (卖出时回车=全仓)
@@ -540,12 +579,15 @@ class Panel:
         cash = snap["cash"]
 
         cn = "买入" if side == "buy" else "卖出"
-        print(f"\n{B}{cn} {symbol}{R}  持有:{held_qty:,.0f}  现金:{cash:,.0f}")
+        print(f"\n{B}{cn} {symbol}{R}  持有:{held_qty:,.0f}  现金:{cash:,.0f}" + (f"  参考价:{px_default}" if px_default else ""))
 
         try:
-            # 数量: 回车 = 卖出全仓 / 买入用全部现金÷价格
-            px_s = self.ask("价格", px_default)
-            px = float(px_default if px_s == px_default else (px_s or px_default))
+            if px_default:
+                px_s = self.ask("价格", px_default)
+                px = float(px_s or px_default)
+            else:
+                px_s = self.ask("价格 (无实时价, 请手动输入)")
+                px = float(px_s)
             if px <= 0:
                 print("✗ 价格无效"); return
 
