@@ -719,6 +719,8 @@ class Config:
 
     # === 数据源 API Token ===
     tushare_token: Optional[str] = None
+    hithink_api_key: Optional[str] = None          # 同花顺扶摇 API (fuyao.aicubes.cn)
+    hithink_priority: int = 2                       # 同花顺源优先级 (2=兜底位, 低于免费源)
     tickflow_api_key: Optional[str] = None
     tickflow_kline_adjust: str = "none"
     tickflow_priority: int = 2
@@ -1225,6 +1227,7 @@ class Config:
                 'sina.com.cn',     # 新浪财经 (Akshare)
                 '163.com',         # 网易财经 (Akshare)
                 'tushare.pro',     # Tushare
+                'aicubes.cn',      # 同花顺扶摇 (Hithink)
                 'baostock.com',    # Baostock
                 'sse.com.cn',      # 上交所
                 'szse.cn',         # 深交所
@@ -1633,6 +1636,7 @@ class Config:
             feishu_app_secret=os.getenv('FEISHU_APP_SECRET'),
             feishu_folder_token=os.getenv('FEISHU_FOLDER_TOKEN'),
             tushare_token=os.getenv('TUSHARE_TOKEN'),
+            hithink_api_key=os.getenv('HITHINK_FINANCE_API_KEY'),
             tickflow_api_key=os.getenv('TICKFLOW_API_KEY'),
             tickflow_kline_adjust=normalize_tickflow_kline_adjust(os.getenv('TICKFLOW_KLINE_ADJUST')),
             tickflow_priority=parse_env_int(os.getenv('TICKFLOW_PRIORITY'), 2, field_name='TICKFLOW_PRIORITY', minimum=0),

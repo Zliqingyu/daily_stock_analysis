@@ -1156,6 +1156,7 @@ class DataFetcherManager:
         from .tencent_fetcher import TencentFetcher
         from .akshare_fetcher import AkshareFetcher
         from .tushare_fetcher import TushareFetcher
+        from .hithink_fetcher import HithinkFetcher
         from .tickflow_fetcher import TickFlowFetcher
         from .pytdx_fetcher import PytdxFetcher
         from .baostock_fetcher import BaostockFetcher
@@ -1176,6 +1177,15 @@ class DataFetcherManager:
             optional_fetchers.append(TushareFetcher())  # 会根据 Token 配置自动调整优先级
         else:
             logger.debug("[数据源初始化] 跳过未配置的 TushareFetcher")
+
+        hithink_api_key = (getattr(config, "hithink_api_key", None) or "").strip()
+        if hithink_api_key:
+            optional_fetchers.append(HithinkFetcher(
+                api_key=hithink_api_key,
+                priority=getattr(config, "hithink_priority", 2),
+            ))
+        else:
+            logger.debug("[数据源初始化] 跳过未配置的 HithinkFetcher")
 
         tickflow_api_key = (getattr(config, "tickflow_api_key", None) or "").strip()
         if tickflow_api_key:
