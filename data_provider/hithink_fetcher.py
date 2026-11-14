@@ -25,7 +25,13 @@ _DEFAULT_BASE_URL = "https://fuyao.aicubes.cn"
 
 
 def _to_thscode(stock_code: str) -> str:
-    """Map normalized 6-digit code to THS suffix form. '' = unsupported (ETF/fund/index)."""
+    """Map normalized 6-digit code to THS suffix form. '' = unsupported.
+
+    A-share stocks: 6xxxxx/688xxx->SH, 0/3xxxxx->SZ, 8/4/92xxxx->BJ.
+    On-exchange funds (ETF/LOF): 5xxxxx->SH, 1xxxxx->SZ — served by the
+    /api/fund/market endpoints (daily K supports ETF only; LOF will be
+    rejected server-side with 3004 and fall through the chain).
+    """
     code = normalize_stock_code(stock_code)
     if not code or not code.isdigit() or len(code) != 6:
         return ""
@@ -35,8 +41,18 @@ def _to_thscode(stock_code: str) -> str:
         return f"{code}.SH"
     if code.startswith(("0", "3")):
         return f"{code}.SZ"
-    # 5xx (SH ETF), 1xx (SZ fund), 11x/204x (bonds) etc. -> not covered by this endpoint
+    if code.startswith("5"):
+        return f"{code}.SH"  # SH ETF/LOF
+    if code.startswith("1"):
+        return f"{code}.SZ"  # SZ ETF/LOF
+    # 204x bonds etc. -> not covered
     return ""
+
+
+def _is_fund_code(stock_code: str) -> bool:
+    """True for on-exchange fund codes (SH 5xxxxx / SZ 1xxxxx) routed to /api/fund."""
+    code = normalize_stock_code(stock_code)
+    return bool(code) and code.startswith(("5", "1"))
 
 
 def _to_ms(date_text: str) -> Optional[int]:
@@ -77,23 +93,32 @@ class HithinkFetcher(BaseFetcher):
         if not start_ms or not end_ms:
             raise DataFetchError(f"HithinkFetcher invalid date range: {start_date}~{end_date}")
 
-        response = requests.get(
-            f"{self.base_url}/api/a-share/prices/historical",
-            headers={"X-api-key": self.api_key, "Accept": "application/json"},
-            params={
+        is_fund = _is_fund_code(stock_code)
+        if is_fund:
+            # ETF daily K endpoint; window hard limit 5 calendar years, no adjust param (qfq fixed)
+            endpoint = f"{self.base_url}/api/fund/market/historical"
+            params = {"thscode": thscode, "interval": "1d", "start": start_ms, "end": end_ms}
+        else:
+            endpoint = f"{self.base_url}/api/a-share/prices/historical"
+            params = {
                 "thscode": thscode,
                 "interval": "1d",
                 "start": start_ms,
                 "end": end_ms,
                 "adjust": "forward",  # 前复权, 与其他源保持一致
-            },
+            }
+
+        response = requests.get(
+            endpoint,
+            headers={"X-api-key": self.api_key, "Accept": "application/json"},
+            params=params,
             timeout=self._HTTP_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
         payload = response.json()
         code = payload.get("code")
-        if code == 1002:
-            # unsupported symbol server-side (e.g. delisted/suspended code) -> let chain fall through
+        if code in (1002, 3004):
+            # unsupported symbol server-side (delisted stock / LOF on fund endpoint) -> let chain fall through
             raise DataFetchError(f"HithinkFetcher server rejected {stock_code}: {payload.get('message')}")
         if code != 0:
             raise DataFetchError(f"HithinkFetcher API error code={code}: {payload.get('message')}")

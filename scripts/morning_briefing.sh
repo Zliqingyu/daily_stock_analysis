@@ -25,3 +25,8 @@ if [ "$REPORT_TODAY" -eq 0 ]; then
   echo "[$(date +%T)] WATCHDOG: 今日早报报告未生成, 推送失败!" >> "$LOG"
   .venv/bin/python /home/kos/pi-feishu-bridge/feishu_send.py "⚠️ DSA早报推送失败 ($(date +%H:%M)) — 分析已完成但发送环节卡死, 请查看 morning_briefing_${LOGDATE}.log 或等我补推" 2>> "$LOG"
 fi
+
+# ETF 双动量轮动信号卡片 (上游 etf_rotation 移植, 失败不阻塞主报)
+echo "[$(date +%T)] etf rotation signal start" >> "$LOG"
+timeout 600 python scripts/etf_rotation_signal.py >> "$LOG" 2>&1
+echo "[$(date +%T)] etf rotation signal exit $?" >> "$LOG"
