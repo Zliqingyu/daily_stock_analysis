@@ -20,6 +20,7 @@ cron: 平日 08:50 (晨报+轮动卡之后)
 from __future__ import annotations
 
 import os
+import re
 import sys
 import traceback
 from datetime import datetime
@@ -81,11 +82,29 @@ def save_picks(codes: list) -> None:
         print(f"⚠️ 写 alpha_latest_picks.txt 失败: {exc}")
 
 
+_DEGR_CN = {
+    "Snapshot source fallback": "快照源降级",
+    "Industry/concepts enrichment": "行业概念补全受限",
+    "Daily K-line enrichment skipped": "日线补全跳过",
+    "Daily K-line sources": "日线多源",
+    "Daily K-line quality flags": "日线质量标记",
+    "Daily K-line source ordering": "日线源序",
+    "Daily K-line source health": "日线源健康",
+    "Daily K-line enrichment row errors": "日线行错误",
+    "Daily K-line enrichment attempted": "日线补全",
+    "Candidate context row errors": "候选上下文错误",
+}
+
+
+def _degr_cn(item: str) -> str:
+    """降级条目前缀 → 简洁中文; 未知前缀照田但去掉冒号后细节。"""
+    prefix = item.split(":", 1)[0].strip()
+    return _DEGR_CN.get(prefix, prefix)
+
+
 def format_card(result, picks: list, *, macro: str = "", tilt_info: str = "", dropped_boards: list[str] | None = None) -> str:
     lines = []
     header = f"🫙 选股漏斗 · {result.strategy}"
-    if result.strategy_category:
-        header += f" ({result.strategy_category})"
     header += f" · {datetime.now():%m-%d %H:%M}"
     lines.append(header)
     if macro:
@@ -121,10 +140,19 @@ def format_card(result, picks: list, *, macro: str = "", tilt_info: str = "", dr
     if dropped_boards:
         lines.append(f"剔除无权限板块: {', '.join(dropped_boards[:5])}")
     if result.degradation:
-        short = [d.split(":", 1)[0] for d in result.degradation[:3]]
-        lines.append(f"降级: {', '.join(short)}")
+        seen: list[str] = []
+        for d in result.degradation:
+            cn = _degr_cn(d)
+            if cn not in seen:
+                seen.append(cn)
+        if seen:
+            lines.append(f"降级: {', '.join(seen[:3])}")
     if result.source_errors:
-        lines.append(f"源错误: {result.source_errors[0][:60]}")
+        err = result.source_errors[0]
+        err = re.sub(r"timed out after \d+s", "超时", err)
+        err = re.sub(r"snapshot source (\S+)", r"\1快照", err)
+        err = re.sub(r"^(\w+): \1", r"\1", err)
+        lines.append(f"源错误: {err[:60]}")
     lines.append("⚠️ 模型信号仅供参考, 非投资建议")
     return "\n".join(lines)
 
