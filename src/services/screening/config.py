@@ -282,7 +282,6 @@ class Config:
                 models = channel.get("models", [])
                 if isinstance(models, list):
                     protocol = str(channel.get("protocol", "openai"))
-                    base_url = str(channel.get("base_url", "") or "")
                     for model in models:
                         normalized = _normalize_litellm_model(str(model), protocol)
                         if normalized:
