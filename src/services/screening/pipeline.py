@@ -5,6 +5,7 @@
 
 import copy
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -411,6 +412,12 @@ def screen(
         )
         degradation.extend(llm_context_degradation)
         llm_prompt_degradation: list[str] = []
+        # glm-5.3-flash (channel-list primary) intermittently returns empty bodies
+        # (per-request lottery on the free coding tier, verified by direct A/B calls)
+        # — extra per-model retries rescue most runs. Order is NEVER overridden:
+        # primary + fallbacks come straight from LLM_CHANNELS via Config.from_env.
+        _scr_retries_raw = os.getenv("SCREENING_LLM_MAX_RETRIES", "").strip()
+        _scr_retries = int(_scr_retries_raw) if _scr_retries_raw.isdigit() else None
         llm_result = rank_candidates_with_metadata(
             picks,
             screening.ranking_hints,
@@ -419,7 +426,7 @@ def screen(
             config.llm_base_url,
             context=effective_context,
             rank_weight=config.llm_rank_weight,
-            max_retries=config.llm_max_retries,
+            max_retries=_scr_retries or config.llm_max_retries,
             min_coverage=config.llm_min_coverage,
             fallback_models=config.llm_fallback_models,
             temperature=config.llm_temperature,

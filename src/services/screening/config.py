@@ -272,6 +272,22 @@ class Config:
         _load_env_file()
         channels = _parse_llm_channels_env()
         llm_model = _resolve_llm_model(channels)
+        # Fallback chain MUST mirror LLM_CHANNELS order: when no explicit
+        # LITELLM_FALLBACK_MODELS is configured, expand every channel's models
+        # (channel order, then in-channel model order), minus the primary.
+        explicit_fallbacks = _parse_csv_env("LITELLM_FALLBACK_MODELS", [])
+        if not explicit_fallbacks:
+            ordered: list[str] = []
+            for channel in channels:
+                models = channel.get("models", [])
+                if isinstance(models, list):
+                    protocol = str(channel.get("protocol", "openai"))
+                    base_url = str(channel.get("base_url", "") or "")
+                    for model in models:
+                        normalized = _normalize_litellm_model(str(model), protocol)
+                        if normalized:
+                            ordered.append(normalized)
+            explicit_fallbacks = [m for m in ordered if m != llm_model]
         data_dir = Path(os.getenv("SCREENING_DATA_DIR", str(_PROJECT_ROOT / "data")))
         fallback_snapshot_path = _resolve_fallback_snapshot_path(data_dir)
         daily_history_cache_dir = (
@@ -289,7 +305,7 @@ class Config:
             llm_model=llm_model,
             llm_base_url=_resolve_llm_base_url(llm_model),
             llm_config_path=_parse_optional_path_env("LITELLM_CONFIG"),
-            llm_fallback_models=_parse_csv_env("LITELLM_FALLBACK_MODELS", []),
+            llm_fallback_models=explicit_fallbacks,
             llm_channels=channels,
             llm_context=os.getenv("LLM_CONTEXT", ""),
             llm_candidate_context_enabled=_parse_bool_env("LLM_CANDIDATE_CONTEXT_ENABLED", False),
