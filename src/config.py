@@ -12,10 +12,12 @@ A股自选股智能分析系统 - 配置管理模块
 
 import json
 import logging
+import math
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple
 from urllib.parse import unquote, urlparse
 from dotenv import load_dotenv, dotenv_values
 from dataclasses import dataclass, field
@@ -419,6 +421,154 @@ def resolve_llm_channel_protocol(
         return "openai"
 
     return ""
+
+
+SUPPORTED_LLM_CHANNEL_API_SURFACES = ('chat_completions', 'responses')
+
+_FALLBACK_LITELLM_MODEL_PROVIDERS = _MANAGED_LITELLM_KEY_PROVIDERS | set(SUPPORTED_LLM_CHANNEL_PROTOCOLS) | {'minimax', 'cohere', 'huggingface', 'bedrock', 'sagemaker', 'azure', 'replicate', 'together_ai', 'palm', 'text-completion-openai', 'command-r', 'groq', 'cerebras', 'fireworks_ai', 'friendliai', 'openrouter', 'xai'}
+
+MODELFLARE_LLM_BASE_URL_DEFAULT = 'https://modelflare.dev/v1'
+
+MODELFLARE_LLM_MODEL_DEFAULT = 'openai/gpt-6.1-sol'
+
+
+def canonicalize_llm_channel_api_surface(value: Optional[str]) -> str:
+    """Normalize an LLM channel endpoint surface label."""
+    candidate = (value or '').strip().lower().replace('-', '_')
+    aliases = {'chat': 'chat_completions', 'chat_completion': 'chat_completions', 'completions': 'chat_completions', 'response': 'responses', 'responses_api': 'responses'}
+    return aliases.get(candidate, candidate)
+
+
+def normalize_llm_channel_api_surface(value: Optional[str]) -> str:
+    """Return a supported endpoint surface, defaulting to Chat Completions."""
+    normalized = canonicalize_llm_channel_api_surface(value)
+    if normalized in SUPPORTED_LLM_CHANNEL_API_SURFACES:
+        return normalized
+    return 'chat_completions'
+
+
+def is_supported_llm_channel_api_surface_value(value: Optional[str]) -> bool:
+    """Return whether a raw API surface is blank or recognized."""
+    canonical = canonicalize_llm_channel_api_surface(value)
+    return not canonical or canonical in SUPPORTED_LLM_CHANNEL_API_SURFACES
+
+
+@lru_cache(maxsize=1)
+def get_litellm_model_providers() -> frozenset:
+    """Return provider identifiers from the installed LiteLLM routing enum."""
+    providers = set(_FALLBACK_LITELLM_MODEL_PROVIDERS)
+    try:
+        from litellm.types.utils import LlmProviders
+        providers.update((str(provider.value).strip().lower() for provider in LlmProviders if str(getattr(provider, 'value', '')).strip()))
+    except (ImportError, AttributeError, TypeError):
+        logger.debug('LiteLLM provider metadata unavailable; using the compatibility fallback')
+    return frozenset(providers)
+
+
+def get_explicit_llm_channel_model_provider(model: str) -> str:
+    """Return the explicit LiteLLM provider prefix, if the model has one."""
+    normalized_model = (model or '').strip()
+    if '/' not in normalized_model:
+        return ''
+    raw_prefix = normalized_model.split('/', 1)[0].lower()
+    canonical_prefix = canonicalize_llm_channel_protocol(raw_prefix)
+    providers = get_litellm_model_providers()
+    if raw_prefix in providers:
+        return raw_prefix
+    if canonical_prefix in providers:
+        return canonical_prefix
+    return ''
+
+
+def resolve_llm_channel_base_url(channel_name: str, base_url: Optional[str]) -> str:
+    """Apply named-channel endpoint defaults without changing explicit configuration."""
+    explicit = (base_url or '').strip()
+    if explicit:
+        return explicit
+    if channel_name.strip().lower() == 'modelflare':
+        return MODELFLARE_LLM_BASE_URL_DEFAULT
+    return ''
+
+
+def resolve_llm_channel_names(config_map: Mapping[str, str]) -> str:
+    """Infer the Modelflare channel from its key unless channels are explicit."""
+    channels = (config_map.get('LLM_CHANNELS') or '').strip()
+    if channels:
+        return channels
+    if any((key.strip() for field in ('MODELFLARE_KEY', 'LLM_MODELFLARE_API_KEY', 'LLM_MODELFLARE_API_KEYS') for key in (config_map.get(field) or '').split(','))):
+        return 'modelflare'
+    return ''
+
+
+def resolve_llm_channel_api_keys(channel_name: str, api_keys: List[str], config_map: Mapping[str, str]) -> List[str]:
+    """Keep explicit channel keys first, with MODELFLARE_KEY as its shorthand."""
+    if api_keys or channel_name.strip().lower() != 'modelflare':
+        return api_keys
+    return [key.strip() for key in (config_map.get('MODELFLARE_KEY') or '').split(',') if key.strip()]
+
+
+def resolve_llm_channel_models(channel_name: str, models: List[str], *, channel_names: str, primary_model: str = '', fallback_models: str = '') -> List[str]:
+    """Resolve explicit routes or the default for a single Modelflare channel."""
+    if models:
+        return models
+    names = [name.strip().lower() for name in channel_names.split(',') if name.strip()]
+    primary = primary_model.strip() or MODELFLARE_LLM_MODEL_DEFAULT
+    if names != ['modelflare'] or channel_name.strip().lower() != 'modelflare' or (not primary.startswith('openai/')) or (not primary[7:].strip()):
+        return []
+    routes = [primary] + [model.strip() for model in fallback_models.split(',')]
+    return list(dict.fromkeys((route for route in routes if route.startswith('openai/') and route[7:].strip())))
+
+
+def find_incompatible_llm_channel_models(models: List[str], protocol: Optional[str], api_surface: Optional[str], base_url: Optional[str] = None) -> List[str]:
+    """Return models whose actual LiteLLM route conflicts with the surface."""
+    if normalize_llm_channel_api_surface(api_surface) != 'responses':
+        return []
+    resolved_protocol = resolve_llm_channel_protocol(protocol, base_url=base_url, models=models)
+    if resolved_protocol != 'openai':
+        return [model for model in models if (model or '').strip()]
+    incompatible: List[str] = []
+    for model in models:
+        normalized_model = normalize_llm_channel_model(model, resolved_protocol, base_url)
+        if normalized_model and get_explicit_llm_channel_model_provider(normalized_model) != 'openai':
+            incompatible.append(model)
+    return incompatible
+
+
+def find_llm_channel_surface_conflicts(channels: List[Dict[str, Any]]) -> Dict[str, Tuple[str, ...]]:
+    """Return public route aliases declared with more than one API surface."""
+    route_surfaces: Dict[str, set] = {}
+    for channel in channels:
+        if not isinstance(channel, dict) or not channel.get('enabled', True):
+            continue
+        protocol = str(channel.get('protocol') or '')
+        base_url = str(channel.get('base_url') or '')
+        surface = normalize_llm_channel_api_surface(channel.get('api_surface'))
+        for raw_model in channel.get('models') or []:
+            model = normalize_llm_channel_model(str(raw_model), protocol, base_url)
+            if model:
+                route_surfaces.setdefault(model, set()).add(surface)
+    return {model: tuple(sorted(surfaces)) for (model, surfaces) in route_surfaces.items() if len(surfaces) > 1}
+
+
+def apply_litellm_api_surface(model: str, api_surface: Optional[str]) -> str:
+    """Encode an explicit API surface in a LiteLLM wire model. (upstream shim)
+
+    Our fork only wires Chat Completions channels, so anything other than an
+    explicit ``responses`` surface passes the model through unchanged.
+    """
+    normalized_model = (model or "").strip()
+    canonical = (api_surface or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not normalized_model or canonical != "responses":
+        return normalized_model
+    provider, _, remainder = normalized_model.partition("/")
+    if provider != "openai" or not remainder:
+        raise ValueError(
+            "Responses API surface requires a normalized openai/<model> route; "
+            f"got {normalized_model!r}"
+        )
+    if remainder.startswith("responses/"):
+        return normalized_model
+    return f"{provider}/responses/{remainder}"
 
 
 def channel_allows_empty_api_key(protocol: Optional[str], base_url: Optional[str]) -> bool:
