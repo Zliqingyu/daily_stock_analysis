@@ -447,8 +447,10 @@ def _parse_llm_channels_env() -> list[dict[str, object]]:
             or _parse_csv_env(f"LLM_{key}_API_KEY", [])
         )
         api_keys = resolve_llm_channel_api_keys(name, api_keys, os.environ)
+        _raw_models = _parse_csv_env(f"LLM_{key}_MODELS", [])
+        # .env 行内注释 ("model  # 说明") 不是模型名的一部分, 剩下会写进API调用必404
         models = resolve_llm_channel_models(
-            name, _parse_csv_env(f"LLM_{key}_MODELS", []),
+            name, [m.split("#")[0].strip() for m in _raw_models if m.split("#")[0].strip()],
             channel_names=resolve_llm_channel_names(os.environ),
             primary_model=os.getenv("LITELLM_MODEL", ""),
             fallback_models=os.getenv("LITELLM_FALLBACK_MODELS", ""),
