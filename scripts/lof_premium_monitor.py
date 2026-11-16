@@ -21,6 +21,28 @@ def load_lofs():
         pass
     return lofs
 
+def discover_new_lofs(lofs):
+    """自动发现新上市LOF: 对比天天基金全市场名单, 新代码带名入池并永久写入universe。
+    失败不影响本次监控 (2026-11-16, 治理手刷名单漏新基金的根因)"""
+    try:
+        sys.path.insert(0, os.path.join(HOME, "dsa"))
+        from data_provider.name_resolver import fund_list
+        fresh = [[x[0], x[2]] for x in fund_list()
+                 if len(x) > 2 and x[2] and "LOF" in str(x[2]).upper() and x[0] not in lofs]
+        if not fresh:
+            return lofs
+        for c, n in fresh:
+            lofs[c] = n
+        entries = json.load(open(UNIVERSE_FILE))
+        have = {e[0] for e in entries}
+        entries += [e for e in fresh if e[0] not in have]
+        with open(UNIVERSE_FILE, "w") as f:
+            json.dump(entries, f, ensure_ascii=False)
+        print(f"[LOF] 自动发现新基金 {len(fresh)} 只: " + ", ".join(c for c, _ in fresh))
+    except Exception as e:
+        print(f"[LOF] 新基金自动发现失败(不影响本次监控): {e}")
+    return lofs
+
 def daily_vol(code):
     """近20日日收益率std → T+2持有期1σ波动% (真实风险项)"""
     try:
@@ -69,7 +91,7 @@ def main():
     if os.path.exists(STATE):
         try: state = json.load(open(STATE))
         except Exception: state = {}
-    LOFS = load_lofs()
+    LOFS = discover_new_lofs(load_lofs())
     px = price(list(LOFS))
     alerts = []
     today = datetime.date.today().isoformat()
