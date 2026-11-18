@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [新功能] 股票名称永久沉淀（持仓∪自选）：主解析链 `get_stock_name` 接入 `data_provider/name_resolver`（本地缓存→腾讯→天天基金），行情源缺失 name 字段时对作用域代码（`portfolio_positions` 持仓 ∪ `STOCK_LIST` 自选）兜底解析，解析成功自动写入共享永久缓存 `~/.dsa_name_cache.json`，报告不再出现"待确认股票"占位；作用域外代码行为不变。
+- [新功能] 盘中触价邮件提醒：`scripts/price_alert_email.py` 每2分钟轮询实时价（交易时段内），只报告每日日报挂单计划的价位触达——回落买入位（可挂单买入，含持仓/风险预算股数参考）、清仓止损位、全部止盈位，方向和操作以日报计划为唯一权威，盘中不叠加其他分析；每日每码每价位仅提醒一次，防骚扰。
 - [新功能] LOF 溢价监控自动发现新上市 LOF：对比天天基金全市场名单补齐代码与名称，名称解析走多源回退（腾讯/天天基金）+ 永久缓存（~/.dsa_name_cache.json），手刷名单漏新基金的问题根除。
 - [修复] 桌面与 Docker 发布显式安装 `orjson`，桌面 PyInstaller 产物同时冻结并执行运行时导入探针，避免 LiteLLM 调用时报 `No module named 'orjson'`。
 - [改进] 个股报告不再单独展示“题材主线与个股位置”卡片，相关市场结构数据仍保留在分析上下文、模型 Prompt 与决策信号提取链路中。

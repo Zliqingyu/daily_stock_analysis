@@ -31,6 +31,7 @@ from src.services.run_diagnostics import record_provider_run, record_provider_ru
 from .fundamental_adapter import AkshareFundamentalAdapter
 from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
 from .realtime_types import CircuitBreaker
+from . import name_resolver as _name_resolver
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -842,6 +843,7 @@ class DataFetcherManager:
         self._ensure_concurrency_guards()
         with self._stock_name_cache_lock:
             self._stock_name_cache[stock_code] = name
+        self._persist_tracked_stock_name(stock_code, name)
         return name
 
     def _get_tickflow_fetcher(self):
@@ -2274,6 +2276,14 @@ class DataFetcherManager:
         if is_meaningful_stock_name(index_name, stock_code):
             return self._cache_stock_name(stock_code, index_name) or index_name
 
+        # 2.5 持久名字缓存(~/.dsa_name_cache.json, 与 portfolio/LOF监控共用): 命中则省去行情调用
+        try:
+            persistent_name = _name_resolver.cached_name(stock_code)
+        except Exception:
+            persistent_name = None
+        if is_meaningful_stock_name(persistent_name, stock_code):
+            return self._cache_stock_name(stock_code, persistent_name) or persistent_name
+
         # 2. 尝试从实时行情中获取（最快，可按需禁用）
         if allow_realtime:
             quote = self.get_realtime_quote(raw_stock_code or stock_code, log_final_failure=False)
@@ -2304,9 +2314,64 @@ class DataFetcherManager:
                 logger.debug(f"[股票名称] {fetcher.name} 获取失败: {e}")
                 continue
 
-        # 4. 所有数据源都失败
+        # 4. 所有数据源都失败 → 持仓/自选代码走 name_resolver 兜底(永久缓存→腾讯→天天基金), 成功即沉淀
+        if stock_code in self._get_persist_stock_codes():
+            try:
+                resolved = _name_resolver.resolve_names([stock_code]).get(stock_code)
+            except Exception as resolved_err:
+                logger.debug(f"[股票名称] name_resolver兜底失败: {resolved_err}")
+                resolved = None
+            if is_meaningful_stock_name(resolved, stock_code):
+                logger.info(f"[股票名称] name_resolver兜底成功: {stock_code} -> {resolved}")
+                return self._cache_stock_name(stock_code, resolved) or resolved
+
         logger.warning(f"[股票名称] 所有数据源都无法获取 {stock_code} 的名称")
         return ""
+
+    def _get_holding_codes(self) -> set:
+        """当前持仓代码集合(quantity>0, 与 morning_holdings_alpha 同一契约); 失败返回空集。"""
+        try:
+            import sqlite3
+            from pathlib import Path as _Path
+
+            db_path = _Path(__file__).resolve().parents[1] / "data" / "stock_analysis.db"
+            if not db_path.exists():
+                return set()
+            conn = sqlite3.connect(str(db_path))
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT symbol FROM portfolio_positions WHERE quantity > 0"
+                ).fetchall()
+            finally:
+                conn.close()
+            return {normalize_stock_code(str(r[0])) for r in rows if r[0]}
+        except Exception as e:
+            logger.debug(f"[股票名称] 持仓读取失败(忽略): {e}")
+            return set()
+
+    def _get_persist_stock_codes(self) -> set:
+        """名称沉淀与兜底解析的作用域 = 持仓 ∪ 自选(STOCK_LIST); 任一读取失败降级为已取得的部分。"""
+        codes = set(self._get_holding_codes())
+        try:
+            from src.config import get_config
+
+            stock_list = get_config().stock_list or []
+            codes |= {normalize_stock_code(str(c)) for c in stock_list if c}
+        except Exception as e:
+            logger.debug(f"[股票名称] 自选列表读取失败(忽略): {e}")
+        return codes
+
+    def _persist_tracked_stock_name(self, stock_code: str, name: str) -> None:
+        """持仓/自选代码的运行时名称沉淀到 ~/.dsa_name_cache.json (best-effort, 失败不影响解析)。"""
+        try:
+            if stock_code in STOCK_NAME_MAP:
+                return  # 静态表本身已持久, 无需重复沉淀
+            if stock_code not in self._get_persist_stock_codes():
+                return
+            _name_resolver.remember_names({stock_code: name})
+            logger.info(f"[股票名称] 名称已沉淀: {stock_code} -> {name}")
+        except Exception as e:
+            logger.debug(f"[股票名称] 名称沉淀失败(忽略): {e}")
 
     def get_belong_boards(self, stock_code: str) -> List[Dict[str, Any]]:
         """

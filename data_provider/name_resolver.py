@@ -87,3 +87,26 @@ def resolve_names(codes):
         todo = [c for c in codes if c not in out]
     _save_cache(cache)
     return out
+
+
+def cached_name(code):
+    """只读永久缓存, 不发起任何网络请求; 未命中返回 None。"""
+    try:
+        return _load_cache().get(code)
+    except Exception:
+        return None
+
+
+def remember_names(mapping):
+    """把已知名称合并进永久缓存(值相同则跳过); best-effort, 失败静默。"""
+    try:
+        cache = _load_cache()
+        changed = False
+        for c, n in (mapping or {}).items():
+            if c and n and cache.get(c) != n:
+                cache[c] = n
+                changed = True
+        if changed:
+            _save_cache(cache)
+    except Exception:
+        pass
