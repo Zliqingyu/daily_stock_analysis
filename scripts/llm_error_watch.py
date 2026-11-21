@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LLM 错误审查哨兵 — 引擎日志出现 ERROR 时自动请 GLM 审查
+"""LLM 错误审查哨兵 — 引擎日志出现 ERROR 时自动请模型链审查
 用法: cron 每 5 分钟 (有状态: offset + 去重, 无重复审查)
 输出: ~/ats/llm_reviews.log + 邮件
 """
@@ -19,9 +19,6 @@ for p in (f"{HOME}/dus/.env", f"{HOME}/ats/.env"):
                 k, v = line.strip().split("=", 1)
                 os.environ.setdefault(k, v)
 
-GLM_KEY = os.getenv("GLM_KEY", "")
-GLM_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions"
-GLM_MODEL = os.getenv("GLM_MODEL", "glm-5.3-flash")
 DEDUP_MIN = 45          # 同类错误 45 分钟内只审一次
 MAX_LOG_CTX = 60        # 附带日志上下文行数
 
@@ -103,16 +100,8 @@ def ask_llm(err_lines, context):
 - 需要人工判断/涉及资金逻辑/你不确定 → action=ESCALATE
 不确定时一律 ESCALATE, 宁可打扰人不可乱修。"""
 
-    body = json.dumps({
-        "model": GLM_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4096,
-    }).encode()
-    req = urllib.request.Request(GLM_URL, data=body, headers={
-        "Authorization": f"Bearer {GLM_KEY}", "Content-Type": "application/json"})
-    r = json.loads(urllib.request.urlopen(req, timeout=120).read())
-    msg = r["choices"][0]["message"]
-    text = (msg.get("content") or "").strip()
+    from llm_chain import call_chain  # 模型顺序见 ~/dus/.env 的 LLM_CHAIN
+    text = call_chain(prompt)
     if not text:
         return json.dumps({"action": "ESCALATE", "reason": "LLM 空回复"})
     # 提取 JSON
